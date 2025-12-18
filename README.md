@@ -41,3 +41,12 @@ Current benchmarks in microseconds (e2e see docs)
 
 Please see our quick
 [getting started on our official docs!](https://smfrpc.github.io/smf//getting_started/)
+
+# how to build
+
+```
+git clone https://github.com/smfrpc/smf.git
+cd smf
+mkdir build && cd build && cmake ..
+make -j$(nproc)
+```
