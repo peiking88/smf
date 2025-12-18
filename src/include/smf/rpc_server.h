@@ -109,7 +109,7 @@ class rpc_server {
   std::vector<out_filter_t> out_filters_;
   // -- http & rpc sockets
   seastar::lw_shared_ptr<seastar::server_socket> listener_;
-  seastar::lw_shared_ptr<seastar::http_server> admin_ = nullptr;
+  seastar::lw_shared_ptr<seastar::httpd::http_server> admin_ = nullptr;
   // connection counting happens in different future
   // must survive this instance
   seastar::lw_shared_ptr<rpc_server_stats> stats_ =

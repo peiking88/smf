@@ -83,11 +83,11 @@ app_run_log_level(seastar::log_level l) {
 
 #define LOG_THROW(format, args...)                                             \
   do {                                                                         \
-    fmt::memory_buffer __smflog_w;                                             \
-    fmt::format_to(__smflog_w, "{}:{}] " format, __FILENAME__, __LINE__,       \
+    smf::internal_logger::get().error("{}:{}] " format, __FILENAME__, __LINE__, \
                    ##args);                                                    \
-    smf::internal_logger::get().error(__smflog_w.data());                      \
-    throw std::runtime_error(__smflog_w.data());                               \
+    auto __smflog_s = fmt::sprintf("{}:{}] " format, __FILENAME__, __LINE__,  \
+                   ##args);                                                    \
+    throw std::runtime_error(__smflog_s.c_str());                              \
   } while (false)
 
 #define THROW_IFNULL(val)                                                      \
@@ -131,11 +131,11 @@ app_run_log_level(seastar::log_level l) {
 #define LOG_THROW_IF(condition, format, args...)                               \
   do {                                                                         \
     if (SMF_UNLIKELY(condition)) {                                             \
-      fmt::memory_buffer __smflog_w;                                           \
-      fmt::format_to(__smflog_w, "{}:{}] (" #condition ") " format,            \
+      smf::internal_logger::get().error("{}:{}] (" #condition ") " format,     \
                      __FILENAME__, __LINE__, ##args);                          \
-      smf::internal_logger::get().error(__smflog_w.data());                    \
-      throw std::runtime_error(__smflog_w.data());                             \
+      auto __smflog_s = fmt::sprintf("{}:{}] (" #condition ") " format,      \
+                     __FILENAME__, __LINE__, ##args);                          \
+      throw std::runtime_error(__smflog_s.c_str());                            \
     }                                                                          \
   } while (false)
 
@@ -146,11 +146,11 @@ app_run_log_level(seastar::log_level l) {
                                  "D '" #val "' Must be non NULL", (val))
 #define DLOG_THROW(format, args...)                                            \
   do {                                                                         \
-    fmt::memory_buffer __smflog_w;                                             \
-    fmt::format_to(__smflog_w, "D {}:{}] " format, __FILENAME__, __LINE__,     \
+    smf::internal_logger::get().error("D {}:{}] " format, __FILENAME__, __LINE__, \
                    ##args);                                                    \
-    smf::internal_logger::get().error(__smflog_w.data());                      \
-    throw std::runtime_error(__smflog_w.data());                               \
+    auto __smflog_s = fmt::sprintf("D {}:{}] " format, __FILENAME__, __LINE__, \
+                   ##args);                                                    \
+    throw std::runtime_error(__smflog_s.c_str());                              \
   } while (false)
 
 #define DLOG_INFO(format, args...)                                             \
@@ -213,11 +213,11 @@ app_run_log_level(seastar::log_level l) {
 #define DLOG_THROW_IF(condition, format, args...)                              \
   do {                                                                         \
     if (SMF_UNLIKELY(condition)) {                                             \
-      fmt::memory_buffer __smflog_w;                                           \
-      fmt::format_to(__smflog_w, "D {}:{}] (" #condition ") " format,          \
+      smf::internal_logger::get().error("D {}:{}] (" #condition ") " format,   \
                      __FILENAME__, __LINE__, ##args);                          \
-      smf::internal_logger::get().error(__smflog_w.data());                    \
-      throw std::runtime_error(__smflog_w.data());                             \
+      auto __smflog_s = fmt::sprintf("D {}:{}] (" #condition ") " format,    \
+                     __FILENAME__, __LINE__, ##args);                          \
+      throw std::runtime_error(__smflog_s.c_str());                            \
     }                                                                          \
   } while (false)
 

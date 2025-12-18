@@ -53,8 +53,11 @@ target_link_libraries(smf
   Seastar::seastar
   Flatbuffers::flatbuffers
   Zstd::zstd
-  Hdrhistogram::hdr_histogram
   xxHash::xxhash)
+
+if(Hdrhistogram_FOUND)
+  target_link_libraries(smf PUBLIC Hdrhistogram::hdr_histogram)
+endif()
 
 if(CMAKE_BUILD_TYPE MATCHES Debug)
   target_compile_options(smf PRIVATE

@@ -6,7 +6,9 @@
 #include <memory>
 #include <utility>
 
+#ifdef HAVE_HDR_HISTOGRAM
 #include <hdr_histogram.h>
+#endif
 #include <seastar/core/metrics_types.hh>
 #include <seastar/core/shared_ptr.hh>
 
@@ -25,23 +27,36 @@ static constexpr const int64_t kDefaultHistogramMaxValue = 3600000000;
 // per instance
 struct hist_t {
   explicit hist_t(int64_t max_value) {
+#ifdef HAVE_HDR_HISTOGRAM
     ::hdr_init(1,          // 1 microsec - minimum value
                max_value,  // 1 hour in microsecs - max value
                3,          // Number of significant figures
                &hist);     // Pointer to initialize
+#endif
   }
 
-  hist_t(hist_t &&o) noexcept : hist(std::move(o.hist)) {}
+  hist_t(hist_t &&o) noexcept 
+#ifdef HAVE_HDR_HISTOGRAM
+    : hist(std::move(o.hist))
+#endif
+  {
+    sample_count = o.sample_count;
+    sample_sum = o.sample_sum;
+  }
 
   SMF_DISALLOW_COPY_AND_ASSIGN(hist_t);
 
   ~hist_t() {
+#ifdef HAVE_HDR_HISTOGRAM
     if (hist) {
       hdr_close(hist);
       hist = nullptr;
     }
+#endif
   }
+#ifdef HAVE_HDR_HISTOGRAM
   hdr_histogram *hist = nullptr;
+#endif
   uint64_t sample_count = 0;
   uint64_t sample_sum = 0;
 };
@@ -73,7 +88,11 @@ class histogram final : public seastar::enable_lw_shared_from_this<histogram> {
   double mean() const;
   size_t memory_size() const;
 
+#ifdef HAVE_HDR_HISTOGRAM
   hdr_histogram *get();
+#else
+  void *get();
+#endif
 
   std::unique_ptr<histogram_measure> auto_measure();
 

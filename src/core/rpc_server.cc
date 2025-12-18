@@ -7,6 +7,7 @@
 #include <seastar/core/metrics.hh>
 #include <seastar/core/prometheus.hh>
 #include <seastar/core/with_timeout.hh>
+#include <seastar/http/httpd.hh>
 
 #include "smf/histogram_seastar_utils.h"
 #include "smf/log.h"
@@ -81,7 +82,7 @@ rpc_server::start() {
   LOG_INFO("Starting server:{}", *this);
   if (!(args_.flags & rpc_server_flags_disable_http_server)) {
     LOG_INFO("Starting HTTP admin server on background future");
-    admin_ = seastar::make_lw_shared<seastar::http_server>("smf admin server");
+    admin_ = seastar::make_lw_shared<seastar::httpd::http_server>(seastar::sstring("smf admin server"));
     LOG_INFO("HTTP server started, adding prometheus routes");
     seastar::prometheus::config conf;
     conf.metric_help = "smf rpc server statistics";
@@ -92,7 +93,7 @@ rpc_server::start() {
         return admin
           ->listen(seastar::make_ipv4_address(
             ip.empty() ? seastar::ipv4_addr{http_port}
-                       : seastar::ipv4_addr{ip, http_port}))
+                       : seastar::ipv4_addr{std::string(ip), http_port}))
           .handle_exception([](auto ep) {
             LOG_ERROR("Exception on HTTP Admin: {}", ep);
             return seastar::make_exception_future<>(ep);
@@ -107,7 +108,7 @@ rpc_server::start() {
     listener_ = seastar::listen(
       seastar::make_ipv4_address(
         args_.ip.empty() ? seastar::ipv4_addr{args_.rpc_port}
-                         : seastar::ipv4_addr{args_.ip, args_.rpc_port}),
+                         : seastar::ipv4_addr{std::string(args_.ip), args_.rpc_port}),
       lo);
   } else {
     listener_ = seastar::tls::listen(
@@ -115,7 +116,7 @@ rpc_server::start() {
       seastar::listen(seastar::make_ipv4_address(
                         args_.ip.empty()
                           ? seastar::ipv4_addr{args_.rpc_port}
-                          : seastar::ipv4_addr{args_.ip, args_.rpc_port}),
+                          : seastar::ipv4_addr{std::string(args_.ip), args_.rpc_port}),
                       lo));
   }
 
@@ -163,13 +164,7 @@ rpc_server::stop() {
           LOG_ERROR("Detected error shutting down client connection: ignoring");
         }
       });
-    return reply_gate_.close().then([admin = admin_ ? admin_ : nullptr] {
-      if (!admin) { return seastar::make_ready_future<>(); }
-      return admin->stop().handle_exception([](auto ep) {
-        LOG_WARN("Warning (ignoring...) shutting down HTTP server: {}", ep);
-        return seastar::make_ready_future<>();
-      });
-    });
+    return reply_gate_.close();
   });
 }
 

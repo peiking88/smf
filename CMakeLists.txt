@@ -9,15 +9,17 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
 set(CMAKE_CXX_FLAGS_MINSIZEREL "-Os")
+# Suppress fmt deprecation warnings
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
 if(NOT CMAKE_BUILD_TYPE)
    set(CMAKE_BUILD_TYPE Release)
 endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(SMF_BUILD_PROGRAMS "Build smf programs and demos" ON)
-option(SMF_ENABLE_INTEGRATION_TESTS "control if integrations are bulit and ran" ON)
-option(SMF_ENABLE_UNIT_TESTS "control if unit tests are bulit and ran" ON)
+option(SMF_BUILD_PROGRAMS "Build smf programs and demos" OFF)
+option(SMF_ENABLE_INTEGRATION_TESTS "control if integrations are bulit and ran" OFF)
+option(SMF_ENABLE_UNIT_TESTS "control if unit tests are bulit and ran" OFF)
 option(SMF_ENABLE_BENCHMARK_TESTS "control if benchmarks are bulit and ran" OFF)
 option(SMF_INSTALL "Enable installation of smf" ON)
 option(SMF_ENABLE_TESTS "Useful for disabling all tests" ON)
@@ -64,7 +66,7 @@ if(SMF_ENABLE_DPDK)
   find_package(dpdk REQUIRED)
 endif()
 
-find_package(Seastar REQUIRED)
+add_subdirectory(seastar)
 find_package(Flatbuffers REQUIRED)
 find_package(gflags REQUIRED)
 find_package(glog REQUIRED)
@@ -73,7 +75,10 @@ find_package(Boost COMPONENTS
   filesystem
   REQUIRED)
 find_package (Threads)
-find_package(Hdrhistogram REQUIRED)
+find_package(Hdrhistogram)
+if(Hdrhistogram_FOUND)
+  add_definitions(-DHAVE_HDR_HISTOGRAM)
+endif()
 find_package(xxHash REQUIRED)
 find_package(Zstd REQUIRED)
 
@@ -107,11 +112,12 @@ if(SMF_INSTALL)
   install(
     DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/include/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-  install(
-    EXPORT smf-export
-    FILE smfTargets.cmake
-    NAMESPACE smf::
-    DESTINATION ${install_cmakedir})
+  # Skip export for now as seastar is not properly exported
+  # install(
+  #   EXPORT smf-export
+  #   FILE smfTargets.cmake
+  #   NAMESPACE smf::
+  #   DESTINATION ${install_cmakedir})
   configure_package_config_file(
     ${CMAKE_CURRENT_LIST_DIR}/cmake/smf-config.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/smf-config.cmake
@@ -130,9 +136,10 @@ if(SMF_INSTALL)
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindHdrhistogram.cmake
     ${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindFlatbuffers.cmake
     DESTINATION ${install_cmakedir})
-  export(
-    EXPORT smf-export
-    FILE ${CMAKE_CURRENT_BINARY_DIR}/smfTargets.cmake
-    NAMESPACE smf::)
-  export(PACKAGE smf)
+  # Skip export for now as seastar is not properly exported
+  # export(
+  #   EXPORT smf-export
+  #   FILE ${CMAKE_CURRENT_BINARY_DIR}/smfTargets.cmake
+  #   NAMESPACE smf::)
+  # export(PACKAGE smf)
 endif()
