@@ -45,7 +45,7 @@ Please see our quick
 # how to build
 
 ```
-git clone https://github.com/smfrpc/smf.git
+git clone https://github.com/peiking88/smf.git
 cd smf
 mkdir build && cd build && cmake ..
 make -j$(nproc)
