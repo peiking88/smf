@@ -82,6 +82,16 @@ Please see our quick
 ```
 git clone https://github.com/peiking88/smf.git
 cd smf
+#安装依赖包执行./install-deps.sh或手工运行以下命令
+sudo apt update && sudo apt upgrade
+sudo apt install -y flatbuffers-compiler libflatbuffers-dev
+sudo apt install -y libgflags-dev libgoogle-glog-dev libzstd-dev libflatbuffers-dev flatbuffers-compiler libxxhash-dev systemtap-sdt-dev xfslibs-dev
+#安装HdrHistogram_c
+git clone https://bgithub.xyz/HdrHistogram/HdrHistogram_c.git
+cd HdrHistogram_c && mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local 
+make && sudo make install
+cd ..
 mkdir build && cd build && cmake ..
 make -j$(nproc)
 ```
