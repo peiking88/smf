@@ -1,5 +1,37 @@
 # [smf - the fastest RPC in the West](http://smfrpc.github.io/smf/) [![Travis-ci Build Status](https://app.travis-ci.com/senior7515/smf.svg?branch=master)](https://travis-ci.org/smfrpc/smf)
 
+---
+
+## Refactoring Summary (2026-01-08)
+
+This project has been refactored to support modern C++ standards and updated dependencies:
+
+### Compiler & Standards
+- Upgraded to **C++23** standard with **g++-15** compiler
+- Updated to latest **Boost** and **fmt** libraries
+
+### Log System Refactoring
+- Replaced log macros (`LOG_INFO`, `LOG_DEBUG`, `LOG_ERROR`, etc.) with template functions
+- Implemented using `std::source_location` (C++20) for automatic file/line/function capture
+- Integrated with **Seastar logger** interface
+
+### Seastar API Compatibility Fixes
+- **Metrics API**: Replaced deprecated `sm::make_derive` with `sm::make_counter` and `sm::make_gauge`
+- **Server Socket**: Changed `lw_shared_ptr<server_socket>` to `std::optional<server_socket>`
+- **Future API**: Replaced `.get0()` with `.get()`
+- **Loop Iteration**: Replaced `boost::counting_iterator` with `seastar::repeat`
+
+### FlatBuffers API Updates
+- Fixed API compatibility issues with newer FlatBuffers versions
+
+### fmt Library Integration
+- Added `fmt::formatter` specializations for custom types:
+  - `smf::human_bytes`
+  - `smf::load_generator_duration`
+  - `smf::load_generator_args`
+
+---
+
 ![](docs/public/logo.png)
 
 > We're looking for a new maintainer for the SMF project. As I have little time to keep up with issues. Please let me know by filing an issue.
