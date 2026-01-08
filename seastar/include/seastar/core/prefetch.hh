@@ -21,19 +21,15 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
 #include <algorithm>
 #include <atomic>
-#include <boost/mpl/range_c.hpp>
-#include <boost/mpl/for_each.hpp>
+#include <utility>
+#include <functional>
 #include <seastar/core/align.hh>
 #include <seastar/core/cacheline.hh>
-#include <seastar/util/modules.hh>
-#endif
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 template <size_t N, int RW, int LOC>
 struct prefetcher;
@@ -70,7 +66,9 @@ void prefetch(Iterator begin, Iterator end) {
 
 template<size_t C, typename T, int LOC = 3>
 void prefetch_n(T** pptr) {
-    boost::mpl::for_each< boost::mpl::range_c<size_t,0,C> >( [pptr] (size_t x) { prefetch<T, LOC>(*(pptr + x)); } );
+    std::invoke([&] <size_t... x> (std::index_sequence<x...>) {
+        (..., prefetch<T, LOC>(*(pptr + x)));
+    }, std::make_index_sequence<C>{});
 }
 
 template<size_t L, int LOC = 3>
@@ -85,7 +83,9 @@ void prefetch_n(Iterator begin, Iterator end) {
 
 template<size_t L, size_t C, typename T, int LOC = 3>
 void prefetch_n(T** pptr) {
-    boost::mpl::for_each< boost::mpl::range_c<size_t,0,C> >( [pptr] (size_t x) { prefetch<L, LOC>(*(pptr + x)); } );
+    std::invoke([&] <size_t... x> (std::index_sequence<x...>) {
+        (..., prefetch<L, LOC>(*(pptr + x)));
+    }, std::make_index_sequence<C>{});
 }
 
 template<typename T, int LOC = 3>
@@ -100,7 +100,9 @@ void prefetchw_n(Iterator begin, Iterator end) {
 
 template<size_t C, typename T, int LOC = 3>
 void prefetchw_n(T** pptr) {
-    boost::mpl::for_each< boost::mpl::range_c<size_t,0,C> >( [pptr] (size_t x) { prefetchw<T, LOC>(*(pptr + x)); } );
+    std::invoke([&] <size_t... x> (std::index_sequence<x...>) {
+        (..., prefetchw<T, LOC>(*(pptr + x)));
+    }, std::make_index_sequence<C>{});
 }
 
 template<size_t L, int LOC = 3>
@@ -115,8 +117,9 @@ void prefetchw_n(Iterator begin, Iterator end) {
 
 template<size_t L, size_t C, typename T, int LOC = 3>
 void prefetchw_n(T** pptr) {
-    boost::mpl::for_each< boost::mpl::range_c<size_t,0,C> >( [pptr] (size_t x) { prefetchw<L, LOC>(*(pptr + x)); } );
+    std::invoke([&] <size_t... x> (std::index_sequence<x...>) {
+        (..., prefetchw<L, LOC>(*(pptr + x)));
+    }, std::make_index_sequence<C>{});
 }
-SEASTAR_MODULE_EXPORT_END
 
 }

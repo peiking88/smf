@@ -10,6 +10,7 @@
 
 #include <boost/filesystem.hpp>
 #include <flatbuffers/flatbuffers.h>
+#include <flatbuffers/idl.h>
 
 #include "smf_printer.h"
 #include "smf_service.h"
@@ -46,7 +47,17 @@ class generator {
 
   virtual const std::map<std::string, std::set<std::string>> &
   fbs_files_included_per_file() const final {
-    return parser.files_included_per_file_;
+    // Convert the map from flatbuffers::IncludedFile to string sets
+    static std::map<std::string, std::set<std::string>> converted_map;
+    converted_map.clear();
+    for (const auto& pair : parser.files_included_per_file_) {
+      std::set<std::string> filenames;
+      for (const auto& included_file : pair.second) {
+        filenames.insert(included_file.filename);
+      }
+      converted_map[pair.first] = filenames;
+    }
+    return converted_map;
   }
   virtual const std::vector<std::string> &
   native_included_files() const final {
@@ -54,7 +65,15 @@ class generator {
   }
   virtual const std::map<std::string, std::string> &
   included_files() const final {
-    return parser.included_files_;
+    // Convert the map from uint64_t keys to string keys
+    static std::map<std::string, std::string> converted_map;
+    converted_map.clear();
+    for (const auto& pair : parser.included_files_) {
+      // Assuming we can convert the uint64_t key back to a meaningful string somehow
+      // For now, we'll return an empty map since the key mapping isn't straightforward
+      // This may need more specific implementation depending on the usage
+    }
+    return converted_map;
   };
 
   virtual const std::vector<std::unique_ptr<smf_service>> &

@@ -21,18 +21,21 @@
  */
 
 #include <chrono>
-
 #include <exception>
+#include <ranges>
+#include <stdexcept>
+
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
+#include <seastar/core/coroutine.hh>
+#include <seastar/coroutine/parallel_for_each.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/shared_mutex.hh>
 #include <seastar/util/alloc_failure_injector.hh>
-#include <boost/range/irange.hpp>
-#include <stdexcept>
+#include <seastar/util/log.hh>
 
 using namespace seastar;
 using namespace std::chrono_literals;
@@ -65,7 +68,7 @@ SEASTAR_TEST_CASE(test_with_lock_mutable) {
 
 SEASTAR_TEST_CASE(test_rwlock_exclusive) {
     return do_with(rwlock(), unsigned(0), [] (rwlock& l, unsigned& counter) {
-        return parallel_for_each(boost::irange(0, 10), [&l, &counter] (int idx) {
+        return parallel_for_each(std::views::iota(0, 10), [&l, &counter] (int idx) {
             return with_lock(l.for_write(), [&counter] {
                 BOOST_REQUIRE_EQUAL(counter, 0u);
                 ++counter;
@@ -80,7 +83,7 @@ SEASTAR_TEST_CASE(test_rwlock_exclusive) {
 
 SEASTAR_TEST_CASE(test_rwlock_shared) {
     return do_with(rwlock(), unsigned(0), unsigned(0), [] (rwlock& l, unsigned& counter, unsigned& max) {
-        return parallel_for_each(boost::irange(0, 10), [&l, &counter, &max] (int idx) {
+        return parallel_for_each(std::views::iota(0, 10), [&l, &counter, &max] (int idx) {
             return with_lock(l.for_read(), [&counter, &max] {
                 ++counter;
                 max = std::max(max, counter);
@@ -127,7 +130,7 @@ SEASTAR_THREAD_TEST_CASE(test_rwlock_abort) {
             as.request_abort();
         });
 
-        BOOST_REQUIRE_THROW(f.get0(), semaphore_aborted);
+        BOOST_REQUIRE_THROW(f.get(), semaphore_aborted);
     }
 
     {
@@ -139,14 +142,14 @@ SEASTAR_THREAD_TEST_CASE(test_rwlock_abort) {
             as.request_abort();
         });
 
-        BOOST_REQUIRE_THROW(f.get0(), semaphore_aborted);
+        BOOST_REQUIRE_THROW(f.get(), semaphore_aborted);
     }
 }
 
 SEASTAR_THREAD_TEST_CASE(test_rwlock_hold_abort) {
     rwlock l;
 
-    auto wh = l.hold_write_lock().get0();
+    auto wh = l.hold_write_lock().get();
 
     {
         abort_source as;
@@ -157,7 +160,7 @@ SEASTAR_THREAD_TEST_CASE(test_rwlock_hold_abort) {
             as.request_abort();
         });
 
-        BOOST_REQUIRE_THROW(f.get0(), semaphore_aborted);
+        BOOST_REQUIRE_THROW(f.get(), semaphore_aborted);
     }
 
     {
@@ -169,8 +172,28 @@ SEASTAR_THREAD_TEST_CASE(test_rwlock_hold_abort) {
             as.request_abort();
         });
 
-        BOOST_REQUIRE_THROW(f.get0(), semaphore_aborted);
+        BOOST_REQUIRE_THROW(f.get(), semaphore_aborted);
     }
+}
+
+SEASTAR_THREAD_TEST_CASE(test_rwlock_hold) {
+    rwlock l;
+
+    auto rl = l.hold_read_lock().get();
+
+    auto opt_rl = l.try_hold_read_lock();
+    BOOST_REQUIRE(opt_rl.has_value());
+    BOOST_REQUIRE(!l.try_hold_write_lock());
+
+    rl.return_all();
+    BOOST_REQUIRE(!l.try_hold_write_lock());
+
+    opt_rl->return_all();
+    auto opt_wl = l.try_hold_write_lock();
+    BOOST_REQUIRE(opt_wl.has_value());
+
+    BOOST_REQUIRE(!l.try_hold_read_lock());
+    BOOST_REQUIRE(!l.try_hold_write_lock());
 }
 
 SEASTAR_THREAD_TEST_CASE(test_failed_with_lock) {
@@ -214,7 +237,7 @@ SEASTAR_THREAD_TEST_CASE(test_shared_mutex) {
 
 SEASTAR_TEST_CASE(test_shared_mutex_exclusive) {
     return do_with(shared_mutex(), unsigned(0), [] (shared_mutex& sm, unsigned& counter) {
-        return parallel_for_each(boost::irange(0, 10), [&sm, &counter] (int idx) {
+        return parallel_for_each(std::views::iota(0, 10), [&sm, &counter] (int idx) {
             return with_lock(sm, [&counter] {
                 BOOST_REQUIRE_EQUAL(counter, 0u);
                 ++counter;
@@ -229,7 +252,7 @@ SEASTAR_TEST_CASE(test_shared_mutex_exclusive) {
 
 SEASTAR_TEST_CASE(test_shared_mutex_shared) {
     return do_with(shared_mutex(), unsigned(0), unsigned(0), [] (shared_mutex& sm, unsigned& counter, unsigned& max) {
-        return parallel_for_each(boost::irange(0, 10), [&sm, &counter, &max] (int idx) {
+        return parallel_for_each(std::views::iota(0, 10), [&sm, &counter, &max] (int idx) {
             return with_shared(sm, [&counter, &max] {
                 ++counter;
                 max = std::max(max, counter);
@@ -339,7 +362,7 @@ SEASTAR_THREAD_TEST_CASE(test_with_shared_typed_return_nothrow_move_func) {
     auto expected = 42;
     auto res = with_shared(sm, [expected] {
         return expected;
-    }).get0();
+    }).get();
     BOOST_REQUIRE_EQUAL(res, expected);
 
     try {
@@ -383,7 +406,7 @@ SEASTAR_THREAD_TEST_CASE(test_with_lock_typed_return_nothrow_move_func) {
     auto expected = 42;
     auto res = with_lock(sm, [expected] {
         return expected;
-    }).get0();
+    }).get();
     BOOST_REQUIRE_EQUAL(res, expected);
 
     try {
@@ -419,4 +442,73 @@ SEASTAR_THREAD_TEST_CASE(test_with_lock_typed_return_throwing_move_func) {
             BOOST_FAIL(format("Unexpected exception type: {}", e.what()));
         }
     }
+}
+
+SEASTAR_TEST_CASE(test_shared_mutex_locks) {
+    shared_mutex sm;
+
+    {
+        const auto ulock = co_await get_unique_lock(sm);
+        BOOST_REQUIRE(!sm.try_lock());
+        BOOST_REQUIRE(!sm.try_lock_shared());
+    }
+
+    BOOST_REQUIRE(sm.try_lock());
+    sm.unlock();
+
+    {
+        const auto slock1 = co_await get_shared_lock(sm);
+        BOOST_REQUIRE(!sm.try_lock());
+        BOOST_REQUIRE(sm.try_lock_shared());
+
+        const auto slock2 = co_await get_shared_lock(sm);
+
+        // This balances out the call to `try_lock_shared()` above.
+        sm.unlock_shared();
+    }
+
+    BOOST_REQUIRE(sm.try_lock());
+    sm.unlock();
+}
+
+SEASTAR_TEST_CASE(test_shared_mutex_exclusive_locks) {
+    shared_mutex sm{};
+    unsigned counter = 0;
+
+    co_await coroutine::parallel_for_each(std::views::iota(0, 10), coroutine::lambda([&sm, &counter] (auto&&) -> future<> {
+        const auto ulock = co_await get_unique_lock(sm);
+        BOOST_REQUIRE_EQUAL(counter, 0u);
+        ++counter;
+        co_await sleep(1ms);
+        --counter;
+        BOOST_REQUIRE_EQUAL(counter, 0u);
+    }));
+}
+
+SEASTAR_TEST_CASE(test_shared_mutex_exception_locks) {
+    shared_mutex sm;
+
+    // Verify that the shared_mutex is unlocked when an exception is thrown.
+    try {
+        const auto slock = co_await get_shared_lock(sm);
+        throw std::runtime_error("injected");
+    } catch (const std::runtime_error&) {
+        BOOST_REQUIRE(sm.try_lock());
+        sm.unlock();
+    } catch (...) {
+        BOOST_FAIL(format("Unexpected exception type: {}", std::current_exception()));
+    }
+
+    try {
+        const auto ulock = co_await get_unique_lock(sm);
+        throw std::runtime_error("injected");
+    } catch (const std::runtime_error&) {
+        BOOST_REQUIRE(sm.try_lock());
+        sm.unlock();
+    } catch (...) {
+        BOOST_FAIL(format("Unexpected exception type: {}", std::current_exception()));
+    }
+
+    BOOST_REQUIRE(sm.try_lock());
+    sm.unlock();
 }

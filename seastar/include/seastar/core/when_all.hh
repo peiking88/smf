@@ -22,19 +22,17 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
 #include <seastar/core/future.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/util/tuple_utils.hh>
 #include <seastar/util/critical_alloc_section.hh>
-#include <seastar/util/modules.hh>
 #include <cstddef>
+#include <concepts>
 #include <exception>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
-#endif
 
 namespace seastar {
 
@@ -145,7 +143,7 @@ class when_all_state : public when_all_state_base {
     // We only schedule one continuation at a time, and store it in _cont.
     // This way, if while the future we wait for completes, some other futures
     // also complete, we won't need to schedule continuations for them.
-    std::aligned_union_t<1, when_all_state_component<Futures>...> _cont;
+    alignas(when_all_state_component<Futures>...) std::byte _cont[std::max({sizeof(when_all_state_component<Futures>)...})];
     when_all_process_element _processors[nr];
 public:
     typename ResolvedTupleTransform::promise_type p;
@@ -188,7 +186,6 @@ public:
 } // namespace internal
 
 /// \cond internal
-SEASTAR_CONCEPT(
 
 namespace impl {
 
@@ -211,14 +208,12 @@ struct is_tuple_of_futures<std::tuple<future<T...>, Rest...>> : is_tuple_of_futu
 template <typename... Futs>
 concept AllAreFutures = impl::is_tuple_of_futures<std::tuple<Futs...>>::value;
 
-)
-
-template<typename Fut, std::enable_if_t<is_future<Fut>::value, int> = 0>
+template<Future Fut>
 auto futurize_invoke_if_func(Fut&& fut) noexcept {
     return std::forward<Fut>(fut);
 }
 
-template<typename Func, std::enable_if_t<!is_future<Func>::value, int> = 0>
+template<std::invocable Func>
 auto futurize_invoke_if_func(Func&& func) noexcept {
     return futurize_invoke(std::forward<Func>(func));
 }
@@ -227,7 +222,7 @@ auto futurize_invoke_if_func(Func&& func) noexcept {
 namespace internal {
 
 template <typename... Futs>
-SEASTAR_CONCEPT( requires seastar::AllAreFutures<Futs...> )
+requires seastar::AllAreFutures<Futs...>
 inline
 future<std::tuple<Futs...>>
 when_all_impl(Futs&&... futs) noexcept {
@@ -250,7 +245,6 @@ when_all_impl(Futs&&... futs) noexcept {
 /// \param fut_or_funcs futures or functions that return futures
 /// \return an \c std::tuple<> of all futures returned; when ready,
 ///         all contained futures will be ready as well.
-SEASTAR_MODULE_EXPORT
 template <typename... FutOrFuncs>
 inline auto when_all(FutOrFuncs&&... fut_or_funcs) noexcept {
     return internal::when_all_impl(futurize_invoke_if_func(std::forward<FutOrFuncs>(fut_or_funcs))...);
@@ -289,9 +283,9 @@ complete_when_all(std::vector<Future>&& futures, typename std::vector<Future>::i
     });
 }
 
-template<typename ResolvedVectorTransform, typename FutureIterator>
+template<typename ResolvedVectorTransform, typename FutureIterator, typename Sentinel>
 inline auto
-do_when_all(FutureIterator begin, FutureIterator end) noexcept {
+do_when_all(FutureIterator begin, Sentinel end) noexcept {
     using itraits = std::iterator_traits<FutureIterator>;
     auto make_values_vector = [] (size_t size) noexcept {
         memory::scoped_critical_alloc_section _;
@@ -300,10 +294,10 @@ do_when_all(FutureIterator begin, FutureIterator end) noexcept {
         return ret;
     };
     std::vector<typename itraits::value_type> ret =
-            make_values_vector(iterator_range_estimate_vector_capacity(begin, end, typename itraits::iterator_category()));
+            make_values_vector(iterator_range_estimate_vector_capacity(begin, end));
     // Important to invoke the *begin here, in case it's a function iterator,
     // so we launch all computation in parallel.
-    std::move(begin, end, std::back_inserter(ret));
+    std::ranges::move(begin, end, std::back_inserter(ret));
     return complete_when_all<ResolvedVectorTransform>(std::move(ret), ret.begin());
 }
 
@@ -319,9 +313,8 @@ do_when_all(FutureIterator begin, FutureIterator end) noexcept {
 /// \param end an \c InputIterator designating the end of the range of futures
 /// \return an \c std::vector<> of all the futures in the input; when
 ///         ready, all contained futures will be ready as well.
-SEASTAR_MODULE_EXPORT
 template <typename FutureIterator>
-SEASTAR_CONCEPT( requires requires (FutureIterator i) { { *i++ }; requires is_future<std::remove_reference_t<decltype(*i)>>::value; } )
+requires requires (FutureIterator i) { { *i++ }; requires is_future<std::remove_reference_t<decltype(*i)>>::value; }
 inline
 future<std::vector<typename std::iterator_traits<FutureIterator>::value_type>>
 when_all(FutureIterator begin, FutureIterator end) noexcept {
@@ -371,7 +364,7 @@ class extract_values_from_futures_tuple {
         auto prepare_result = [] (auto futures) noexcept {
             auto fs = tuple_filter_by_type<internal::future_has_value>(std::move(futures));
             return tuple_map(std::move(fs), [] (auto&& e) {
-                return e.get0();
+                return e.get();
             });
         };
 
@@ -432,7 +425,7 @@ struct extract_values_from_futures_vector {
                 if (f.failed()) {
                     excp = f.get_exception();
                 } else {
-                    values.emplace_back(f.get0());
+                    values.emplace_back(f.get());
                 }
             } else {
                 f.ignore_ready_future();
@@ -476,7 +469,7 @@ struct extract_values_from_futures_vector<future<>> {
 };
 
 template<typename... Futures>
-SEASTAR_CONCEPT( requires seastar::AllAreFutures<Futures...> )
+requires seastar::AllAreFutures<Futures...>
 inline auto when_all_succeed_impl(Futures&&... futures) noexcept {
     using state = when_all_state<extract_values_from_futures_tuple<Futures...>, Futures...>;
     return state::wait_all(std::forward<Futures>(futures)...);
@@ -494,7 +487,6 @@ inline auto when_all_succeed_impl(Futures&&... futures) noexcept {
 ///
 /// \param fut_or_funcs futures or functions that return futures
 /// \return future containing values of futures returned by funcs
-SEASTAR_MODULE_EXPORT
 template <typename... FutOrFuncs>
 inline auto when_all_succeed(FutOrFuncs&&... fut_or_funcs) noexcept {
     return internal::when_all_succeed_impl(futurize_invoke_if_func(std::forward<FutOrFuncs>(fut_or_funcs))...);
@@ -510,15 +502,14 @@ inline auto when_all_succeed(FutOrFuncs&&... fut_or_funcs) noexcept {
 /// \param begin an \c InputIterator designating the beginning of the range of futures
 /// \param end an \c InputIterator designating the end of the range of futures
 /// \return an \c std::vector<> of all the valus in the input
-SEASTAR_MODULE_EXPORT
-template <typename FutureIterator, typename = typename std::iterator_traits<FutureIterator>::value_type>
-SEASTAR_CONCEPT( requires requires (FutureIterator i) {
+template <typename FutureIterator, typename Sentinel, typename = typename std::iterator_traits<FutureIterator>::value_type>
+requires requires (FutureIterator i) {
      *i++;
      { i != i } -> std::convertible_to<bool>;
      requires is_future<std::remove_reference_t<decltype(*i)>>::value;
-} )
+}
 inline auto
-when_all_succeed(FutureIterator begin, FutureIterator end) noexcept {
+when_all_succeed(FutureIterator begin, Sentinel end) noexcept {
     using itraits = std::iterator_traits<FutureIterator>;
     using result_transform = internal::extract_values_from_futures_vector<typename itraits::value_type>;
     try {
@@ -540,7 +531,6 @@ when_all_succeed(FutureIterator begin, FutureIterator end) noexcept {
 ///
 /// \param futures a \c std::vector containing the futures to wait for.
 /// \return an \c std::vector<> of all the values in the input
-SEASTAR_MODULE_EXPORT
 template <typename T>
 inline auto
 when_all_succeed(std::vector<future<T>>&& futures) noexcept {

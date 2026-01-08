@@ -33,15 +33,11 @@
 #include <seastar/core/iostream.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/internal/api-level.hh>
-#include <seastar/util/modules.hh>
 
-#ifndef SEASTAR_MODULE
 #include <cstdint>
-#endif
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 class file_input_stream_history {
     static constexpr uint64_t window_size = 4 * 1024 * 1024;
@@ -60,9 +56,6 @@ class file_input_stream_history {
 struct file_input_stream_options {
     size_t buffer_size = 8192;    ///< I/O buffer size
     unsigned read_ahead = 0;      ///< Maximum number of extra read-ahead operations
-#if SEASTAR_API_LEVEL < 7
-    ::seastar::io_priority_class io_priority_class = default_priority_class();
-#endif
     lw_shared_ptr<file_input_stream_history> dynamic_adjustments = { }; ///< Input stream history, if null dynamic adjustments are disabled
 };
 
@@ -78,17 +71,29 @@ struct file_input_stream_options {
 input_stream<char> make_file_input_stream(
         file file, uint64_t offset, uint64_t len, file_input_stream_options options = {});
 
-// Create an input_stream for a given file, with the specified options.
-// Multiple fibers of execution (continuations) may safely open
-// multiple input streams concurrently for the same file.
+/// \brief Create an input_stream for a given file, reading starting at a given
+///        position of the given file, with the specified options.
+/// \param file File to read; multiple streams for the same file may coexist
+/// \param offset Starting offset to read from (no alignment restrictions)
+///
+/// \note Multiple fibers of execution (continuations) may safely open
+///       multiple input streams concurrently for the same file.
 input_stream<char> make_file_input_stream(
         file file, uint64_t offset, file_input_stream_options = {});
 
-// Create an input_stream for reading starting at a given position of the
-// given file. Multiple fibers of execution (continuations) may safely open
-// multiple input streams concurrently for the same file.
+/// Create an input_stream for a given file, with the specified options
+/// \param file File to read; multiple streams for the same file may coexist
+///
+/// \note Multiple fibers of execution (continuations) may safely open
+///       multiple input streams concurrently for the same file.
 input_stream<char> make_file_input_stream(
         file file, file_input_stream_options = {});
+
+/// Create a data_source for reading the given offset:len range from the file
+data_source make_file_data_source(file, uint64_t offset, uint64_t len, file_input_stream_options);
+
+/// Create a data_source for reading the whole file from start to end
+data_source make_file_data_source(file, file_input_stream_options);
 
 struct file_output_stream_options {
     // For small files, setting preallocation_size can make it impossible for XFS to find
@@ -101,9 +106,6 @@ struct file_output_stream_options {
     unsigned buffer_size = 65536;
     unsigned preallocation_size = 0; ///< Preallocate extents. For large files, set to a large number (a few megabytes) to reduce fragmentation
     unsigned write_behind = 1; ///< Number of buffers to write in parallel
-#if SEASTAR_API_LEVEL < 7
-    ::seastar::io_priority_class io_priority_class = default_priority_class();
-#endif
 };
 
 /// Create an output_stream for writing starting at the position zero of a
@@ -127,6 +129,5 @@ future<output_stream<char>> make_file_output_stream(
 /// Closes the file if the sink creation fails.
 future<data_sink> make_file_data_sink(file, file_output_stream_options) noexcept;
 
-SEASTAR_MODULE_EXPORT_END
 
 }

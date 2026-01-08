@@ -19,6 +19,8 @@
  * Copyright 2015 Cloudius Systems
  */
 #include <cmath>
+#include <iostream>
+#include <ranges>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/app-template.hh>
 #include <seastar/rpc/rpc.hh>
@@ -227,7 +229,7 @@ int main(int ac, char** av) {
             (void)sleep(400ms).then([test12] () mutable {
                 // server is configured for 10MB max, throw 25MB worth of requests at it.
                 auto now = rpc::rpc_clock_type::now();
-                return parallel_for_each(boost::irange(0, 25), [test12, now] (int idx) mutable {
+                return parallel_for_each(std::views::iota(0, 25), [test12, now] (int idx) mutable {
                     return test12(*client, 100, uninitialized_string(1'000'000)).then([idx, now] {
                         auto later = rpc::rpc_clock_type::now();
                         auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(later - now);

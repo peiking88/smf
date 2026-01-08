@@ -32,14 +32,15 @@
 
 #include <seastar/core/iostream.hh>
 #include <seastar/core/sstring.hh>
-#include <string>
-#include <vector>
+#include <string_view>
 #include <strings.h>
 #include <seastar/http/common.hh>
 #include <seastar/http/mime_types.hh>
+#include <seastar/http/types.hh>
 #include <seastar/net/socket_defs.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/util/string_utils.hh>
+#include <seastar/util/iostream.hh>
 
 namespace seastar {
 
@@ -65,8 +66,10 @@ struct request {
     size_t content_length = 0;
     mutable size_t _bytes_written = 0;
     std::unordered_map<sstring, sstring, seastar::internal::case_insensitive_hash, seastar::internal::case_insensitive_cmp> _headers;
-    std::unordered_map<sstring, sstring> query_parameters;
+    // deprecated: it is used to store last value of query parameters, but will be removed in the future
+    [[deprecated("Use helper methods instead")]] std::unordered_map<sstring, sstring> query_parameters;
     httpd::parameters param;
+    [[deprecated("use content_stream (server-side) / write_body (client-side) instead")]]
     sstring content; // server-side deprecated: use content_stream instead
     /*
      * The handler should read the contents of this stream till reaching eof (i.e., the end of this request's content). Failing to do so
@@ -77,7 +80,21 @@ struct request {
     std::unordered_map<sstring, sstring> trailing_headers;
     std::unordered_map<sstring, sstring> chunk_extensions;
     sstring protocol_name = "http";
-    noncopyable_function<future<>(output_stream<char>&&)> body_writer; // for client
+    http::body_writer_type body_writer; // for client
+
+    using query_parameters_type = std::unordered_map<sstring, std::vector<sstring>, seastar::internal::string_view_hash, std::equal_to<>>;
+private:
+    query_parameters_type _query_params;
+public:
+
+// NOTE: Remove this once both `query_parameters` and `content` are removed
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    request() = default;
+    request(request&&) = default;
+    request& operator=(request&&) = default;
+    ~request() = default;
+#pragma GCC diagnostic pop
 
     /**
      * Get the address of the client that generated the request
@@ -109,16 +126,99 @@ struct request {
     }
 
     /**
-     * Search for the first header of a given name
-     * @param name the header name
-     * @return a pointer to the header value, if it exists or empty string
+     * Does the query parameters contain a given key?
+     * @param key the query parameter key
+     * @return true if the key exists, false otherwise
      */
-    sstring get_query_param(const sstring& name) const {
-        auto res = query_parameters.find(name);
-        if (res == query_parameters.end()) {
-            return "";
+    bool has_query_param(std::string_view key) const {
+        return _query_params.contains(key);
+    }
+
+    /**
+     * Search for the last query parameter of a given key
+     * @param key the query parameter key
+     * @return the query parameter value, if it exists or the default_value otherwise
+     */
+    sstring get_query_param(std::string_view key, std::string_view default_value = "") const {
+        auto res = _query_params.find(key);
+        if (res != _query_params.end()) {
+            return res->second.back();
         }
-        return res->second;
+
+        return sstring(default_value);
+    }
+
+    /**
+     * Search for all query parameters of a given key
+     * @param key the query parameter key
+     * @return a vector of all query parameter values, if it exists or an empty vector
+     */
+    const std::vector<sstring>& get_query_param_array(std::string_view key) const {
+        if (auto res = _query_params.find(key); res != _query_params.end()) {
+            return res->second;
+        }
+        static const std::vector<sstring> empty_vector;
+        return empty_vector;
+    }
+
+    /**
+     * Get all query parameters
+     * @return a map of all query parameters
+     */
+    const query_parameters_type& get_query_params() const {
+        return _query_params;
+    }
+
+    /**
+     * Set a query parameter value
+     * @param key the query parameter key
+     * @param value the query parameter value
+     * @return a reference to this request object
+     */
+    request& set_query_param(std::string_view key, std::string_view value) {
+        return set_query_param(key, {value});
+    }
+
+    /**
+     * Set a query parameter value
+     * @param key the query parameter key
+     * @param values the query parameter values
+     * @return a reference to this request object
+    */
+    request& set_query_param(std::string_view key, std::initializer_list<std::string_view> values) {
+        _query_params[sstring(key)] = std::vector<sstring>(values.begin(), values.end());
+        return *this;
+    }
+
+    /**
+     * Set a query parameter value
+     * @param key the query parameter key
+     * @param values the query parameter values
+     * @return a reference to this request object
+    */
+    request& set_query_param(std::string_view key, std::vector<sstring> values) {
+        _query_params[sstring(key)] = std::move(values);
+        return *this;
+    }
+
+    /**
+     * Set the query parameters in the request objects.
+     * @param params a map of query parameters
+     * @return a reference to this request object
+     */
+    request& set_query_params(query_parameters_type params) {
+        _query_params = std::move(params);
+        return *this;
+    }
+
+    /**
+     * Search for the last path parameter of a given key
+     * @param key the path paramerter key
+     * @return the unescaped path parameter value, if it exists and can be path decoded successfully, otherwise it
+     *  returns an empty string
+     */
+    sstring get_path_param(const sstring& key) const {
+        return param.get_decoded_param(key);
     }
 
     /**
@@ -175,20 +275,28 @@ struct request {
     sstring format_url() const;
 
     /**
-     * Set the content type mime type.
-     * Used when the mime type is known.
-     * For most cases, use the set_content_type
+     * Set the content type. The content_type string can be one of:
+     * 1. A MIME (RFC 2045) Content-Type - looking like "type/subtype", e.g.,
+     *   "text/html"
+     * 2. If a "/" is missing in the given string, we look it up in a list of
+     *    common file extensions listed in the http::mime_types map. For
+     *    example "html" will be mapped to "text/html".
      */
-    void set_mime_type(const sstring& mime) {
-        _headers["Content-Type"] = mime;
+    void set_content_type(std::string_view content_type) {
+        if (content_type.find('/') == std::string_view::npos) {
+            content_type = http::mime_types::extension_to_type(content_type);
+        }
+        _headers["Content-Type"] = sstring(content_type);
     }
 
-    /**
-     * Set the content type mime type according to the file extension
-     * that would have been used if it was a file: e.g. html, txt, json etc'
-     */
-    void set_content_type(const sstring& content_type = "html") {
-        set_mime_type(http::mime_types::extension_to_type(content_type));
+    [[deprecated("Use set_content_type(std::string_view) instead")]]
+    void set_content_type() {
+        set_content_type("html");
+    }
+
+    [[deprecated("Use set_content_type(std::string_view) instead")]]
+    void set_mime_type(const sstring& mime) {
+        set_content_type(mime);
     }
 
     /**
@@ -221,7 +329,21 @@ struct request {
      * collection of memory buffers. Message would use chunked transfer encoding.
      *
      */
-    void write_body(const sstring& content_type, noncopyable_function<future<>(output_stream<char>&&)>&& body_writer);
+    void write_body(const sstring& content_type, http::body_writer_type&& body_writer);
+
+    /*!
+     * \brief use and output stream to write the message body
+     *
+     * The same as above, but the caller can only .write() data into the stream, it will be
+     * closed (and flushed) automatically after the writer fn resolves
+     */
+    template <typename W>
+    requires std::is_invocable_r_v<future<>, W, output_stream<char>&>
+    void write_body(const sstring& content_type, W&& body_writer) {
+        write_body(content_type, [body_writer = std::move(body_writer)] (output_stream<char>&& out) mutable -> future<> {
+            return util::write_to_stream_and_close(std::move(out), std::move(body_writer));
+        });
+    }
 
     /**
      * \brief Use an output stream to write the message body
@@ -245,7 +367,21 @@ struct request {
      * the stream, sending the request would resolve with exceptional future.
      *
      */
-    void write_body(const sstring& content_type, size_t len, noncopyable_function<future<>(output_stream<char>&&)>&& body_writer);
+    void write_body(const sstring& content_type, size_t len, http::body_writer_type&& body_writer);
+
+    /*!
+     * \brief use and output stream to write the message body
+     *
+     * The same as above, but the caller can only .write() data into the stream, it will be
+     * closed (and flushed) automatically after the writer fn resolves
+     */
+    template <typename W>
+    requires std::is_invocable_r_v<future<>, W, output_stream<char>&>
+    void write_body(const sstring& content_type, size_t len, W&& body_writer) {
+        write_body(content_type, len, [body_writer = std::move(body_writer)] (output_stream<char>&& out) mutable -> future<> {
+            return util::write_to_stream_and_close(std::move(out), std::move(body_writer));
+        });
+    }
 
     /**
      * \brief Make request send Expect header
@@ -276,12 +412,20 @@ struct request {
      */
     static request make(httpd::operation_type type, sstring host, sstring path);
 
-private:
-    void add_param(const std::string_view& param);
     sstring request_line() const;
     future<> write_request_headers(output_stream<char>& out) const;
+private:
+    void add_query_param(std::string_view param);
     friend class experimental::connection;
 };
+
+namespace internal {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+inline sstring& deprecated_content(request& req) noexcept { return req.content; }
+inline const sstring& deprecated_content(const request& req) noexcept { return req.content; }
+#pragma GCC diagnostic pop
+}
 
 } // namespace httpd
 

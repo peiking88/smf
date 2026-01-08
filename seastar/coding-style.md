@@ -33,7 +33,7 @@ Think of the leading underscore as a shorthand for `this->`.
 Template parameters use `CamelCase`
 
 Note: because the Concept Technical Specification used CamelCase for concepts,
-some Seastar concepts alse use CamelCase. These will be gradually deprecated
+some Seastar concepts also use CamelCase. These will be gradually deprecated
 and replaced with snake_case names. New concepts should use snake_case.
 
 ## Including header files
@@ -68,7 +68,7 @@ void a_function() {
 
 An exception is namespaces -- the body is _not_ indented, to prevent files that are almost 100% whitespace left margin.
 
-When making a change, if you need to insert an indentation level, you can temporarily break the rules by insering a half-indent, so that the patch is easily reviewable:
+When making a change, if you need to insert an indentation level, you can temporarily break the rules by inserting a half-indent, so that the patch is easily reviewable:
 
 ```c++
 void a_function() {
@@ -90,9 +90,9 @@ Avoid output parameters; use return values instead.  In/out parameters are trick
 
 If a function accepts a lambda or an `std::function`, make it the last argument, so that it can be easily provided inline:
 
-```c++ 
+```c++
 template <typename Func>
-void function_accepting_a_lambda(int a, int b, Func func);
+int function_accepting_a_lambda(int a, int b, Func func);
 
 int f() {
     return function_accepting_a_lambda(2, 3, [] (int x, int y) {
@@ -116,7 +116,7 @@ a_struct<T1, T2>::a_function(T3 a, T4 b) {                         // And I'm th
 
 ## Whitespace around operators
 
-Whitespace around operators should match their precedence: high precedence = no spaces, low precedency = add spaces:
+Whitespace around operators should match their precedence: high precedence = no spaces, low precedence = add spaces:
 
 ```c++
      return *a + *b;  // good
@@ -127,7 +127,7 @@ Whitespace around operators should match their precedence: high precedence = no 
 
 ## Long lines
 
-If a line becomes excessively long (>120 characters?), or is just complicated, break it into two or more lines.  The second (and succeeding lines) are _continuation lines_, and have a double indent:
+If a line becomes excessively long (>160 characters?), or is just complicated, break it into two or more lines.  The second (and succeeding lines) are _continuation lines_, and have a double indent:
 
 ```c++
     if ((some_condition && some_other_condition)

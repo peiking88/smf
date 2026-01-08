@@ -36,6 +36,18 @@ find_path (c-ares_INCLUDE_DIR
     ${PC_c-ares_INCLUDEDIR}
     ${PC_c-ares_INCLUDE_DIRS})
 
+if (c-ares_INCLUDE_DIR)
+  foreach (v MAJOR MINOR PATCH)
+    file(STRINGS "${c-ares_INCLUDE_DIR}/ares_version.h" ares_VERSION_LINE
+      REGEX "^#define[ \t]+ARES_VERSION_${v}[ \t]+[0-9]+$")
+    if (ares_VERSION_LINE MATCHES "ARES_VERSION_${v} ([0-9]+)")
+      set (c-ares_VERSION_${v} "${CMAKE_MATCH_1}")
+    endif ()
+    unset (ares_VERSION_LINE)
+  endforeach ()
+  set (c-ares_VERSION ${c-ares_VERSION_MAJOR}.${c-ares_VERSION_MINOR}.${c-ares_VERSION_PATCH})
+endif ()
+
 mark_as_advanced (
   c-ares_LIBRARY
   c-ares_INCLUDE_DIR)
@@ -46,7 +58,7 @@ find_package_handle_standard_args (c-ares
   REQUIRED_VARS
     c-ares_LIBRARY
     c-ares_INCLUDE_DIR
-  VERSION_VAR PC_c-ares_VERSION)
+  VERSION_VAR c-ares_VERSION)
 
 if (c-ares_FOUND)
   set (c-ares_LIBRARIES ${c-ares_LIBRARY})

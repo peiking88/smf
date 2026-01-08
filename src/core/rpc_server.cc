@@ -40,25 +40,25 @@ rpc_server::rpc_server(rpc_server_args args)
   metrics_.add_group(
     "smf::rpc_server",
     {
-      sm::make_derive("active_connections", stats_->active_connections,
+      sm::make_gauge("active_connections", [this] { return stats_->active_connections; },
                       sm::description("Currently active connections")),
-      sm::make_derive("total_connections", stats_->total_connections,
+      sm::make_counter("total_connections", [this] { return stats_->total_connections; },
                       sm::description("Counts a total connetions")),
-      sm::make_derive("incoming_bytes", stats_->in_bytes,
+      sm::make_counter("incoming_bytes", [this] { return stats_->in_bytes; },
                       sm::description("Total bytes received of healthy "
                                       "connections - ignores bad connections")),
-      sm::make_derive("outgoing_bytes", stats_->out_bytes,
+      sm::make_counter("outgoing_bytes", [this] { return stats_->out_bytes; },
                       sm::description("Total bytes sent to clients")),
-      sm::make_derive("bad_requests", stats_->bad_requests,
+      sm::make_counter("bad_requests", [this] { return stats_->bad_requests; },
                       sm::description("Bad requests")),
-      sm::make_derive(
-        "no_route_requests", stats_->no_route_requests,
+      sm::make_counter(
+        "no_route_requests", [this] { return stats_->no_route_requests; },
         sm::description(
           "Requests made to this sersvice with correct header but no handler")),
-      sm::make_derive("completed_requests", stats_->completed_requests,
+      sm::make_counter("completed_requests", [this] { return stats_->completed_requests; },
                       sm::description("Correct round-trip returned responses")),
-      sm::make_derive(
-        "too_large_requests", stats_->too_large_requests,
+      sm::make_counter(
+        "too_large_requests", [this] { return stats_->too_large_requests; },
         sm::description(
           "Requests made to this server larger than max allowedd (2GB)")),
       sm::make_histogram("handler_dispatch_latency",
@@ -79,7 +79,7 @@ rpc_server::copy_histogram() {
 
 void
 rpc_server::start() {
-  LOG_INFO("Starting server:{}", *this);
+  LOG_INFO("Starting server");
   if (!(args_.flags & rpc_server_flags_disable_http_server)) {
     LOG_INFO("Starting HTTP admin server on background future");
     admin_ = seastar::make_lw_shared<seastar::httpd::http_server>(seastar::sstring("smf admin server"));
@@ -105,19 +105,19 @@ rpc_server::start() {
   lo.reuse_address = true;
 
   if (!creds_) {
-    listener_ = seastar::listen(
+    listener_.emplace(seastar::listen(
       seastar::make_ipv4_address(
         args_.ip.empty() ? seastar::ipv4_addr{args_.rpc_port}
                          : seastar::ipv4_addr{std::string(args_.ip), args_.rpc_port}),
-      lo);
+      lo));
   } else {
-    listener_ = seastar::tls::listen(
+    listener_.emplace(seastar::tls::listen(
       creds_,
       seastar::listen(seastar::make_ipv4_address(
                         args_.ip.empty()
                           ? seastar::ipv4_addr{args_.rpc_port}
                           : seastar::ipv4_addr{std::string(args_.ip), args_.rpc_port}),
-                      lo));
+                      lo)));
   }
 
   (void)seastar::keep_doing([this] {
@@ -267,7 +267,7 @@ rpc_server::do_dispatch_rpc(seastar::lw_shared_ptr<rpc_server_connection> conn,
           rpc::compression_flags::compression_flags_none) {
         conn->set_error(fmt::format("There was no decompression filter for "
                                     "compression enum: {}",
-                                    ctx.header.compression()));
+                                    static_cast<int>(ctx.header.compression())));
         return seastar::make_ready_future<>();
       }
       return method_dispatch->apply(std::move(ctx))

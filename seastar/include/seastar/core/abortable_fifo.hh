@@ -24,22 +24,22 @@
 #include <seastar/core/abort_source.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/chunked_fifo.hh>
-#include <seastar/util/modules.hh>
+#include <seastar/util/assert.hh>
 
-#ifndef SEASTAR_MODULE
 #include <memory>
 #include <optional>
 #include <type_traits>
-#endif
 
 namespace seastar {
 
 namespace internal {
 
-SEASTAR_CONCEPT(
-    template <typename Aborter, typename T>
-    concept aborter = std::is_nothrow_invocable_r_v<void, Aborter, T&>;
-)
+// Test if aborter has call operator accepting optional exception_ptr
+template <typename Aborter, typename T>
+concept aborter_ex = std::is_nothrow_invocable_r_v<void, Aborter, T&, const std::optional<std::exception_ptr>&>;
+
+template <typename Aborter, typename T>
+concept aborter = std::is_nothrow_invocable_r_v<void, Aborter, T&> || aborter_ex<Aborter, T>;
 
 // This class satisfies 'aborter' concept and is used by default
 template<typename... T>
@@ -48,7 +48,7 @@ struct noop_aborter {
 };
 
 
-/// Container for elements with support for cancelation of entries.
+/// Container for elements with support for cancellation of entries.
 ///
 /// OnAbort is a functor which will be called with a reference to T right before it expires.
 /// T is removed and destroyed from the container immediately after OnAbort returns.
@@ -57,7 +57,7 @@ struct noop_aborter {
 /// The container can only be moved before any elements are pushed.
 ///
 template <typename T, typename OnAbort = noop_aborter<T>>
-SEASTAR_CONCEPT( requires aborter<OnAbort, T> )
+requires aborter<OnAbort, T>
 class abortable_fifo {
 private:
     struct entry {
@@ -67,8 +67,12 @@ private:
         entry(const T& payload_) : payload(payload_) {}
         entry(T payload_, abortable_fifo& ef, abort_source& as)
                 : payload(std::move(payload_))
-                , sub(as.subscribe([this, &ef] () noexcept {
-                    ef._on_abort(*payload);
+                , sub(as.subscribe([this, &ef] (const std::optional<std::exception_ptr>& ex_opt) noexcept {
+                    if constexpr (aborter_ex<OnAbort, T>) {
+                        ef._on_abort(*payload, ex_opt);
+                    } else {
+                        ef._on_abort(*payload);
+                    }
                     payload = std::nullopt;
                     --ef._size;
                     ef.drop_expired_front();
@@ -105,7 +109,7 @@ public:
     abortable_fifo(abortable_fifo&& o) noexcept
             : abortable_fifo(std::move(o._on_abort)) {
         // entry objects hold a reference to this so non-empty containers cannot be moved.
-        assert(o._size == 0);
+        SEASTAR_ASSERT(o._size == 0);
     }
 
     abortable_fifo& operator=(abortable_fifo&& o) noexcept {
@@ -189,7 +193,11 @@ public:
     /// The element will expire when abort source is triggered.
     void push_back(T&& payload, abort_source& as) {
         if (as.abort_requested()) {
-            _on_abort(payload);
+            if constexpr (aborter_ex<OnAbort, T>) {
+                _on_abort(payload, std::nullopt);
+            } else {
+                _on_abort(payload);
+            }
             return;
         }
         if (_size == 0) {
@@ -226,15 +234,19 @@ public:
         if (!_list.empty()) {
             e = &_list.back();
         }
-        assert(!e->sub);
-        auto aborter = [this, e] () noexcept {
-            _on_abort(*e->payload);
+        SEASTAR_ASSERT(!e->sub);
+        auto aborter = [this, e] (const std::optional<std::exception_ptr>& ex_opt) noexcept {
+            if constexpr (aborter_ex<OnAbort, T>) {
+                _on_abort(*e->payload, ex_opt);
+            } else {
+                _on_abort(*e->payload);
+            }
             e->payload = std::nullopt;
             --_size;
             drop_expired_front();
         };
         if (as.abort_requested()) {
-            aborter();
+            aborter(as.abort_requested_exception_ptr());
             return;
         }
         e->sub = as.subscribe(std::move(aborter));

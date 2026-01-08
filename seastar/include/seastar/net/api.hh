@@ -21,13 +21,11 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
 #include <chrono>
 #include <memory>
 #include <vector>
 #include <cstring>
 #include <sys/types.h>
-#endif
 
 #include <seastar/core/future.hh>
 #include <seastar/net/byteorder.hh>
@@ -35,10 +33,10 @@
 #include <seastar/net/packet.hh>
 #include <seastar/core/internal/api-level.hh>
 #include <seastar/core/temporary_buffer.hh>
+#include <seastar/core/file-types.hh>
 #include <seastar/core/iostream.hh>
 #include <seastar/util/std-compat.hh>
 #include <seastar/util/program-options.hh>
-#include <seastar/util/modules.hh>
 
 namespace seastar {
 
@@ -94,7 +92,7 @@ public:
     virtual socket_address get_src() = 0;
     virtual socket_address get_dst() = 0;
     virtual uint16_t get_dst_port() = 0;
-    virtual packet& get_data() = 0;
+    virtual std::span<temporary_buffer<char>> get_buffers() = 0;
 };
 
 using udp_datagram_impl = datagram_impl;
@@ -102,12 +100,24 @@ using udp_datagram_impl = datagram_impl;
 class datagram final {
 private:
     std::unique_ptr<datagram_impl> _impl;
+    // The get_data() below will need to tell
+    //  - _p wasn't initialized from get_buffers() span
+    //  - _p was initialized, but was then release()-d by caller
+    // from each other. thus std::optional
+    std::optional<net::packet> _p;
 public:
     datagram(std::unique_ptr<datagram_impl>&& impl) noexcept : _impl(std::move(impl)) {};
     socket_address get_src() { return _impl->get_src(); }
     socket_address get_dst() { return _impl->get_dst(); }
     uint16_t get_dst_port() { return _impl->get_dst_port(); }
-    packet& get_data() { return _impl->get_data(); }
+    [[deprecated("Use get_buf() instead")]]
+    packet& get_data() {
+        if (!_p) {
+            _p.emplace(_impl->get_buffers());
+        }
+        return _p.value();
+    }
+    std::span<temporary_buffer<char>> get_buffers() { return _impl->get_buffers(); }
 };
 
 using udp_datagram = datagram;
@@ -127,7 +137,20 @@ public:
 
     future<datagram> receive();
     future<> send(const socket_address& dst, const char* msg);
+    [[deprecated("Use send(std::span<temporary_buffer<char>>) overload")]]
     future<> send(const socket_address& dst, packet p);
+    /**
+     * \brief Send a datagram composed of multiple buffers to the specified destination.
+     *
+     * The temporary_buffers objects referenced must remain valid only for the duration
+     * of the call. The implementation transfers the buffers ownership before returning
+     * the future.
+     *
+     * \param dst The destination socket address.
+     * \param bufs A span of temporary_buffer<char> objects containing the data to send.
+     * \return A future that completes when the send operation is finished.
+     */
+    future<> send(const socket_address& dst, std::span<temporary_buffer<char>> bufs);
     bool is_closed() const;
     /// Causes a pending receive() to complete (possibly with an exception)
     void shutdown_input();
@@ -388,16 +411,46 @@ public:
 
 /// @}
 
+/// Options for creating a listening socket.
+///
+/// WARNING: these options currently only have an effect when using
+/// the POSIX stack: all options are ignored on the native stack as they
+/// are not implemented there.
 struct listen_options {
     bool reuse_address = false;
     server_socket::load_balancing_algorithm lba = server_socket::load_balancing_algorithm::default_;
     transport proto = transport::TCP;
     int listen_backlog = 100;
     unsigned fixed_cpu = 0u;
+    std::optional<file_permissions> unix_domain_socket_permissions;
+
+    /// If set, the SO_SNDBUF size will be set to the given value on the listening socket
+    /// via setsockopt. This buffer size is inherited by the sockets returned by
+    /// accept and is the preferred way to set the buffer size for these sockets since
+    /// setting it directly on the already-accepted socket is ineffective (see TCP(7)).
+    std::optional<int> so_sndbuf;
+
+    /// If set, the SO_RCVBUF size will be set to the given value on the listening socket
+    /// via setsockopt. This buffer size is inherited by the sockets returned by
+    /// accept and is the preferred way to set the buffer size for these sockets since
+    /// setting it directly on the already-accepted socket is ineffective (see TCP(7)).
+    std::optional<int> so_rcvbuf;
+
     void set_fixed_cpu(unsigned cpu) {
         lba = server_socket::load_balancing_algorithm::fixed;
         fixed_cpu = cpu;
     }
+
+    // The connection is encapsulated with proxy protocol (which is just
+    // a header prepended to the data stream). connected_socket::remote_address()
+    // and connected_socket::local_address() will return the addresses
+    // as specified in the proxy protocol header. load_balancing_algorithm::port
+    // will use the port from the proxy protocol header.
+    //
+    // Currently only proxy protocol v2 binary format is supported.
+    //
+    // The proxy protocol is defined in https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
+    bool proxy_protocol = false;
 };
 
 class network_interface {
@@ -424,6 +477,19 @@ public:
     bool supports_ipv6() const;
 };
 
+struct statistics {
+    uint64_t bytes_sent = 0;
+    uint64_t bytes_received = 0;
+};
+
+namespace metrics {
+class metric_groups;
+class label_instance;
+}
+
+void register_net_metrics_for_scheduling_group(
+    metrics::metric_groups& m, unsigned sg_id, const metrics::label_instance& name);
+
 class network_stack {
 public:
     virtual ~network_stack() {}
@@ -448,8 +514,13 @@ public:
         return false;
     }
 
-    /** 
-     * Returns available network interfaces. This represents a 
+    // Return network stats (bytes sent/received etc.) for this stack and scheduling group
+    virtual statistics stats(unsigned scheduling_group_id) = 0;
+    // Clears the stats for this stack and scheduling group
+    virtual void clear_stats(unsigned scheduling_group_id) = 0;
+
+    /**
+     * Returns available network interfaces. This represents a
      * snapshot of interfaces available at call time, hence the
      * return by value.
      */

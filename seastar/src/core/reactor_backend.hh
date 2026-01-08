@@ -23,25 +23,21 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/core/posix.hh>
+#include <seastar/core/internal/io_desc.hh>
 #include <seastar/core/internal/pollable_fd.hh>
 #include <seastar/core/internal/poll.hh>
-#include <seastar/core/linux-aio.hh>
+#include <seastar/core/internal/linux-aio.hh>
 #include <seastar/core/cacheline.hh>
-#include <seastar/util/modules.hh>
 
 #ifndef SEASTAR_MODULE
 #include <fmt/ostream.h>
 #include <sys/time.h>
-#include <signal.h>
 #include <thread>
 #include <stack>
 #include <boost/any.hpp>
 #include <boost/program_options.hpp>
 #include <boost/container/static_vector.hpp>
 
-#ifdef HAVE_OSV
-#include <osv/newpoll.hh>
-#endif
 #endif
 
 namespace seastar {
@@ -66,7 +62,7 @@ class aio_storage_context {
     static constexpr unsigned max_aio = 1024;
 
     class iocb_pool {
-        alignas(cache_line_size) std::array<internal::linux_abi::iocb, max_aio> _iocb_pool;
+        alignas(cache_line_size) std::array<internal::linux_abi::iocb, max_aio> _all_iocbs;
         std::stack<internal::linux_abi::iocb*, boost::container::static_vector<internal::linux_abi::iocb*, max_aio>> _free_iocbs;
     public:
         iocb_pool();
@@ -172,8 +168,8 @@ public:
 
 // The "reactor_backend" interface provides a method of waiting for various
 // basic events on one thread. We have one implementation based on epoll and
-// file-descriptors (reactor_backend_epoll) and one implementation based on
-// OSv-specific file-descriptor-less mechanisms (reactor_backend_osv).
+// file-descriptors (reactor_backend_epoll), one implementation based on
+// linux aio, and one implementation based on io_uring.
 class reactor_backend {
 public:
     virtual ~reactor_backend() {};
@@ -202,12 +198,13 @@ public:
     virtual future<std::tuple<pollable_fd, socket_address>>
     accept(pollable_fd_state& listenfd) = 0;
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) = 0;
-    virtual void shutdown(pollable_fd_state& fd, int how) = 0;
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) = 0;
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) = 0;
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) = 0;
-    virtual future<size_t> sendmsg(pollable_fd_state& fd, net::packet& p) = 0;
+    virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) = 0;
+#if SEASTAR_API_LEVEL < 9
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) = 0;
+#endif
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) = 0;
 
     virtual bool do_blocking_io() const {
@@ -269,12 +266,13 @@ public:
     virtual future<std::tuple<pollable_fd, socket_address>>
     accept(pollable_fd_state& listenfd) override;
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override;
-    virtual void shutdown(pollable_fd_state& fd, int how) override;
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override;
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override;
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override;
-    virtual future<size_t> sendmsg(pollable_fd_state& fd, net::packet& p) override;
+    virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) override;
+#if SEASTAR_API_LEVEL < 9
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override;
+#endif
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override;
 
     virtual void signal_received(int signo, siginfo_t* siginfo, void* ignore) override;
@@ -291,13 +289,12 @@ public:
 
 class reactor_backend_aio : public reactor_backend {
     reactor& _r;
-    unsigned max_polls() const;
     file_desc _hrtimer_timerfd;
     aio_storage_context _storage_context;
     // We use two aio contexts, one for preempting events (the timer tick and
     // signals), the other for non-preempting events (fd poll).
     preempt_io_context _preempting_io; // Used for the timer tick and the high resolution timer
-    aio_general_context _polling_io{max_polls()}; // FIXME: unify with disk aio_context
+    aio_general_context _polling_io; // FIXME: unify with disk aio_context
     hrtimer_aio_completion _hrtimer_poll_completion;
     smp_wakeup_aio_completion _smp_wakeup_aio_completion;
     static file_desc make_timerfd();
@@ -319,12 +316,13 @@ public:
     virtual future<std::tuple<pollable_fd, socket_address>>
     accept(pollable_fd_state& listenfd) override;
     virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override;
-    virtual void shutdown(pollable_fd_state& fd, int how) override;
     virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override;
     virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override;
     virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override;
-    virtual future<size_t> sendmsg(pollable_fd_state& fd, net::packet& p) override;
+    virtual future<size_t> sendmsg(pollable_fd_state& fd, std::span<iovec> iovs, size_t len) override;
+#if SEASTAR_API_LEVEL < 9
     virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override;
+#endif
     virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override;
 
     virtual void signal_received(int signo, siginfo_t* siginfo, void* ignore) override;
@@ -338,45 +336,6 @@ public:
     virtual pollable_fd_state_ptr
     make_pollable_fd_state(file_desc fd, pollable_fd::speculation speculate) override;
 };
-
-#ifdef HAVE_OSV
-// reactor_backend using OSv-specific features, without any file descriptors.
-// This implementation cannot currently wait on file descriptors, but unlike
-// reactor_backend_epoll it doesn't need file descriptors for waiting on a
-// timer, for example, so file descriptors are not necessary.
-class reactor_backend_osv : public reactor_backend {
-private:
-    osv::newpoll::poller _poller;
-    future<> get_poller_future(reactor_notifier_osv *n);
-    promise<> _timer_promise;
-public:
-    reactor_backend_osv();
-    virtual ~reactor_backend_osv() override { }
-
-    virtual bool reap_kernel_completions() override;
-    virtual bool kernel_submit_work() override;
-    virtual bool kernel_events_can_sleep() const override;
-    virtual void wait_and_process_events(const sigset_t* active_sigmask) override;
-    virtual future<> readable(pollable_fd_state& fd) override;
-    virtual future<> writeable(pollable_fd_state& fd) override;
-    virtual void forget(pollable_fd_state& fd) noexcept override;
-
-    virtual future<std::tuple<pollable_fd, socket_address>>
-    accept(pollable_fd_state& listenfd) override;
-    virtual future<> connect(pollable_fd_state& fd, socket_address& sa) override;
-    virtual void shutdown(pollable_fd_state& fd, int how) override;
-    virtual future<size_t> read(pollable_fd_state& fd, void* buffer, size_t len) override;
-    virtual future<size_t> recvmsg(pollable_fd_state& fd, const std::vector<iovec>& iov) override;
-    virtual future<temporary_buffer<char>> read_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override;
-    virtual future<size_t> sendmsg(pollable_fd_state& fd, net::packet& p) override;
-    virtual future<size_t> send(pollable_fd_state& fd, const void* buffer, size_t len) override;
-    virtual future<temporary_buffer<char>> recv_some(pollable_fd_state& fd, internal::buffer_allocator* ba) override;
-
-    void enable_timer(steady_clock_type::time_point when);
-    virtual pollable_fd_state_ptr
-    make_pollable_fd_state(file_desc fd, pollable_fd::speculation speculate) override;
-};
-#endif /* HAVE_OSV */
 
 class reactor_backend_uring;
 
@@ -397,8 +356,6 @@ public:
 
 }
 
-#if FMT_VERSION >= 90000
 
 template <> struct fmt::formatter<seastar::reactor_backend_selector> : fmt::ostream_formatter {};
 
-#endif

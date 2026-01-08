@@ -22,14 +22,11 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
+#include <fmt/core.h>
 #include <exception>
-#include <seastar/util/modules.hh>
-#endif
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT
 class timed_out_error : public std::exception {
 public:
     virtual const char* what() const noexcept {
@@ -37,7 +34,6 @@ public:
     }
 };
 
-SEASTAR_MODULE_EXPORT
 struct default_timeout_exception_factory {
     static auto timeout() {
         return timed_out_error();
@@ -45,3 +41,13 @@ struct default_timeout_exception_factory {
 };
 
 } // namespace seastar
+
+#if FMT_VERSION < 100000
+// fmt v10 introduced formatter for std::exception
+template <>
+struct fmt::formatter<seastar::timed_out_error> : fmt::formatter<string_view> {
+    auto format(const seastar::timed_out_error& e, fmt::format_context& ctx) const {
+        return fmt::format_to(ctx.out(), "{}", e.what());
+    }
+};
+#endif

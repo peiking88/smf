@@ -69,22 +69,20 @@
 // tag in pool.
 //
 
-#ifdef SEASTAR_MODULE
-module;
-#endif
 
-#include <cassert>
+#include <concepts>
 #include <unordered_set>
 #include <iostream>
 #include <optional>
-#include <thread>
 #include <memory_resource>
+#include <thread>
+
+#include <seastar/util/assert.hh>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
 #include <boost/container/static_vector.hpp>
-#include <seastar/util/concepts.hh>
 
 #include <dlfcn.h>
 
@@ -93,22 +91,18 @@ module;
 #include <cstdint>
 #include <algorithm>
 #include <limits>
-#include <cassert>
 #include <atomic>
 #include <mutex>
 #include <functional>
 #include <cstring>
+#include <utility>
 #include <boost/intrusive/list.hpp>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <linux/mempolicy.h>
 
-#ifdef SEASTAR_HAVE_NUMA
-#include <numaif.h>
-#endif
 #endif // !defined(SEASTAR_DEFAULT_ALLOCATOR)
 
-#ifdef SEASTAR_MODULE
-module seastar;
-#else
 #include <seastar/core/cacheline.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/print.hh>
@@ -118,17 +112,16 @@ module seastar;
 #include <seastar/util/sampler.hh>
 #include <seastar/util/log.hh>
 #include <seastar/core/aligned_buffer.hh>
+#include <seastar/core/align.hh>
 #ifndef SEASTAR_DEFAULT_ALLOCATOR
 #include <seastar/core/bitops.hh>
-#include <seastar/core/align.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/util/backtrace.hh>
 #endif
-#endif
 
 #ifdef SEASTAR_DEBUG
-#define dassert(expr) assert(expr)
+#define dassert(expr) SEASTAR_ASSERT(expr)
 #else
 #define dassert(expr) do {} while(false)
 #endif
@@ -145,7 +138,7 @@ void* internal::allocate_aligned_buffer_impl(size_t size, size_t align) {
     } else if (r == EINVAL) {
         throw std::runtime_error(format("Invalid alignment of {:d}; allocating {:d} bytes", align, size));
     } else {
-        assert(r == 0);
+        SEASTAR_ASSERT(r == 0);
         return ret;
     }
 }
@@ -157,18 +150,10 @@ namespace memory {
 // seastar allocator is enabled.
 seastar::logger seastar_memory_logger("seastar_memory");
 
-static thread_local int abort_on_alloc_failure_suppressed = 0;
+namespace internal {
 
-disable_abort_on_alloc_failure_temporarily::disable_abort_on_alloc_failure_temporarily() {
-    ++abort_on_alloc_failure_suppressed;
-}
+thread_local constinit int abort_on_alloc_failure_suppressed = 0;
 
-disable_abort_on_alloc_failure_temporarily::~disable_abort_on_alloc_failure_temporarily() noexcept {
-    --abort_on_alloc_failure_suppressed;
-}
-
-void enable_abort_on_allocation_failure() {
-    set_abort_on_allocation_failure(true);
 }
 
 static std::pmr::polymorphic_allocator<char> static_malloc_allocator{std::pmr::get_default_resource()};;
@@ -207,12 +192,10 @@ merge(numa_layout one, numa_layout two) {
 
 #ifndef SEASTAR_DEFAULT_ALLOCATOR
 
-#if FMT_VERSION >= 90000
 namespace seastar::memory {
 struct human_readable_value;
 }
 template <> struct fmt::formatter<struct seastar::memory::human_readable_value> : fmt::ostream_formatter {};
-#endif
 
 namespace seastar {
 
@@ -226,9 +209,12 @@ static allocation_site_ptr get_allocation_site();
 [[gnu::noinline]]
 static void on_allocation_failure(size_t size);
 
-static constexpr unsigned cpu_id_shift = 36; // FIXME: make dynamic
-static constexpr unsigned max_cpus = 256;
-static constexpr uintptr_t cpu_id_and_mem_base_mask = ~((uintptr_t(1) << cpu_id_shift) - 1);
+static constexpr unsigned bits_for_cpu_id_and_memory = 44; // 3 reserved for memory area prefix, 47 total address space
+
+static constexpr unsigned cpu_id_shift_initial = bits_for_cpu_id_and_memory - 8;
+static constinit unsigned cpu_id_shift = cpu_id_shift_initial; // Will be adjusted later after we know how many cpus we have
+static constexpr unsigned max_cpus = 4096;
+static constinit uintptr_t cpu_id_and_mem_base_mask = ~((uintptr_t(1) << cpu_id_shift_initial) - 1);
 
 using pageidx = uint32_t;
 
@@ -313,9 +299,12 @@ namespace bi = boost::intrusive;
 
 static thread_local uintptr_t local_expected_cpu_id = std::numeric_limits<uintptr_t>::max();
 
+
 inline
 unsigned object_cpu_id(const void* ptr) {
-    return (reinterpret_cast<uintptr_t>(ptr) >> cpu_id_shift) & 0xff;
+    auto uptr = reinterpret_cast<uintptr_t>(ptr);
+    auto mask = (size_t(1) << bits_for_cpu_id_and_memory) - 1;
+    return (uptr & mask) >> cpu_id_shift;
 }
 
 class page_list_link {
@@ -325,7 +314,7 @@ class page_list_link {
     friend seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar::internal::log_buf::inserter_iterator);
 };
 
-constexpr size_t mem_base_alloc = size_t(1) << 44;
+constexpr size_t mem_base_alloc = size_t(1) << bits_for_cpu_id_and_memory;
 
 static char* mem_base() {
     static char* known;
@@ -345,8 +334,8 @@ static char* mem_base() {
         ::munmap(known + mem_base_alloc, cr + 2 * mem_base_alloc - (known + mem_base_alloc));
         // extremely unlikely for mmap to return a mapping at 0, but our detection of free(null)
         // depends on it not doing that so check it
-        assert(known != nullptr);
-        assert(reinterpret_cast<uintptr_t>(known) != 0);
+        SEASTAR_ASSERT(known != nullptr);
+        SEASTAR_ASSERT(reinterpret_cast<uintptr_t>(known) != 0);
     });
     return known;
 }
@@ -556,7 +545,35 @@ struct cpu_pages {
     uint32_t nr_pages;
     uint32_t nr_free_pages;
     uint32_t current_min_free_pages = 0;
-    size_t large_allocation_warning_threshold = std::numeric_limits<size_t>::max();
+    struct {
+        size_t warn = std::numeric_limits<size_t>::max();
+        size_t check = std::numeric_limits<size_t>::max();
+        unsigned descend_attempt = 0;
+
+        void set(size_t value) noexcept {
+            warn = value;
+            check = value;
+            descend_attempt = 0;
+        }
+
+        void ascend() noexcept {
+            warn *= 1.618;
+            descend_attempt = 0;
+        }
+
+        void maybe_descend() noexcept {
+            // Large allocation rate per second is much smaller than one
+            // So in the worst case the warn threshold should be descended after 20+ seconds
+            if (++descend_attempt >= 20) {
+                if (warn > check + page_size) {
+                    warn -= page_size;
+                } else {
+                    warn = check;
+                }
+                descend_attempt = 0;
+            }
+        }
+    } large_allocation_warning_threshold = {};
     unsigned cpu_id = -1U;
     std::function<void (std::function<void ()>)> reclaim_hook;
     std::vector<reclaimer*> reclaimers;
@@ -712,7 +729,7 @@ cpu_pages::link(page_list& list, page* span) {
 }
 
 void cpu_pages::free_span_no_merge(uint32_t span_start, uint32_t nr_pages) {
-    assert(nr_pages);
+    SEASTAR_ASSERT(nr_pages);
     nr_free_pages += nr_pages;
     auto span = &pages[span_start];
     auto span_end = &pages[span_start + nr_pages - 1];
@@ -846,7 +863,6 @@ void
 cpu_pages::warn_large_allocation(size_t size) {
     alloc_stats::increment_local(alloc_stats::types::large_allocs);
     seastar_memory_logger.warn("oversized allocation: {} bytes. This is non-fatal, but could lead to latency and/or fragmentation issues. Please report: at {}", size, current_backtrace());
-    large_allocation_warning_threshold *= 1.618; // prevent spam
 }
 
 allocation_site_ptr
@@ -907,8 +923,13 @@ cpu_pages::definitely_sample(size_t size) {
 void
 inline
 cpu_pages::check_large_allocation(size_t size) {
-    if (size >= large_allocation_warning_threshold) {
-        warn_large_allocation(size);
+    if (size >= large_allocation_warning_threshold.check) [[unlikely]] {
+        if (size >= large_allocation_warning_threshold.warn) {
+            warn_large_allocation(size);
+            large_allocation_warning_threshold.ascend(); // prevent spam;
+        } else {
+            large_allocation_warning_threshold.maybe_descend(); // possibly re-encourage spam;
+        }
     }
 }
 
@@ -1091,7 +1112,7 @@ void cpu_pages::free(void* ptr, size_t size) {
 #endif
 }
 
-// Is the passed pointer a local pointer, i.e., allocated on the current shard from the 
+// Is the passed pointer a local pointer, i.e., allocated on the current shard from the
 // per-shard allocator.
 [[gnu::always_inline]]
 inline bool
@@ -1129,7 +1150,7 @@ cpu_pages::try_free_fastpath(void* ptr) {
 struct no_size {};
 
 template <typename S>
-SEASTAR_CONCEPT(requires std::same_as<S, size_t> || std::same_as<S, no_size>)
+requires std::same_as<S, size_t> || std::same_as<S, no_size>
 [[gnu::noinline]]
 static void free_slowpath(void* obj, S size) {
     if (cpu_pages::is_local_pointer(obj)) {
@@ -1169,7 +1190,7 @@ cpu_pages::do_foreign_free(void* ptr) {
 }
 
 void cpu_pages::shrink(void* ptr, size_t new_size) {
-    assert(object_cpu_id(ptr) == cpu_id);
+    SEASTAR_ASSERT(object_cpu_id(ptr) == cpu_id);
     page* span = to_page(ptr);
     if (span->pool) {
         return;
@@ -1213,7 +1234,7 @@ bool cpu_pages::initialize() {
     cpu_id = cpu_id_gen.fetch_add(1, std::memory_order_relaxed);
     local_expected_cpu_id = (static_cast<uint64_t>(cpu_id) << cpu_id_shift)
 	        | reinterpret_cast<uintptr_t>(mem_base());
-    assert(cpu_id < max_cpus);
+    SEASTAR_ASSERT(cpu_id < max_cpus);
     all_cpus[cpu_id] = this;
     auto base = mem_base() + (size_t(cpu_id) << cpu_id_shift);
     auto size = 32 << 20;  // Small size for bootstrap
@@ -1360,7 +1381,7 @@ void cpu_pages::schedule_reclaim() {
 }
 
 memory::memory_layout cpu_pages::memory_layout() {
-    assert(is_initialized());
+    SEASTAR_ASSERT(is_initialized());
     return {
         reinterpret_cast<uintptr_t>(memory),
         reinterpret_cast<uintptr_t>(memory) + nr_pages * page_size
@@ -1639,9 +1660,36 @@ void *allocate_slowpath(size_t size) {
             alloc_stats::increment(alloc_stats::types::foreign_mallocs);
             return original_malloc_func(size);
         }
+
         // original_malloc_func might be null for allocations before main
         // in constructors before original_malloc_func ctor is called
+        // Note on #2137: Moved to here, because there is lots of code
+        // that implicitly relies on the static init fiasco below to have occurred, and thus
+        // cpu_mem_ptr being available and inited. This is not great.
         init_cpu_mem();
+
+        // #2137 - static init fiasco for fallback functions.
+        // If dependent libraries do malloc _before_ the above declaration inits are run,
+        // we end up here with nowhere to go. Add a second check and attempt the full init
+        // already. If we find the functions, all is good. Otherwise, trudge along and probably
+        // crash terribly later.
+        // Note: this is only relevant if we're in dlinit phase, in which case we are single
+        // threaded. Or there is no external func to find. No need for atomics or fences.
+        static bool double_checked = false;
+        if (!double_checked) {
+            double_checked = true;
+
+            original_malloc_func = reinterpret_cast<malloc_func_type>(dlsym(RTLD_NEXT, "malloc"));
+            original_free_func = reinterpret_cast<free_func_type>(dlsym(RTLD_NEXT, "free"));
+            original_realloc_func = reinterpret_cast<realloc_func_type>(dlsym(RTLD_NEXT, "realloc"));
+            original_aligned_alloc_func = reinterpret_cast<aligned_alloc_type>(dlsym(RTLD_NEXT, "aligned_alloc"));
+            original_malloc_trim_func = reinterpret_cast<malloc_trim_type>(dlsym(RTLD_NEXT, "malloc_trim"));
+            original_malloc_usable_size_func = reinterpret_cast<malloc_usable_size_type>(dlsym(RTLD_NEXT, "malloc_usable_size"));
+
+            if (original_malloc_func) {
+                return allocate_slowpath(size);
+            }
+        }
     }
     // On the fast path we've already called maybe_sample, except in the case
     // of !is_reactor_thread (we don't sample such alloctions).
@@ -1713,15 +1761,7 @@ void* allocate_aligned(size_t align, size_t size) {
     } else {
         ptr = allocate_large_aligned(align, size, should_sample);
     }
-    if (!ptr) {
-        on_allocation_failure(size);
-    } else {
-#ifdef SEASTAR_DEBUG_ALLOCATIONS
-        std::memset(ptr, debug_allocation_pattern, size);
-#endif
-    }
-    alloc_stats::increment_local(alloc_stats::types::allocs);
-    return ptr;
+    return finish_allocation(ptr, size);
 }
 
 
@@ -1789,15 +1829,58 @@ reclaimer::~reclaimer() {
 }
 
 void set_large_allocation_warning_threshold(size_t threshold) {
-    get_cpu_mem().large_allocation_warning_threshold = threshold;
+    get_cpu_mem().large_allocation_warning_threshold.set(threshold);
 }
 
 size_t get_large_allocation_warning_threshold() {
-    return get_cpu_mem().large_allocation_warning_threshold;
+    return get_cpu_mem().large_allocation_warning_threshold.warn;
 }
 
 void disable_large_allocation_warning() {
-    get_cpu_mem().large_allocation_warning_threshold = std::numeric_limits<size_t>::max();
+    get_cpu_mem().large_allocation_warning_threshold.set(std::numeric_limits<size_t>::max());
+}
+
+void configure_minimal() {
+    init_cpu_mem();
+}
+
+static long mbind(void *addr,
+                  unsigned long len,
+                  int mode,
+                  const unsigned long *nodemask,
+                  unsigned long maxnode,
+                  unsigned flags) {
+    return syscall(
+        SYS_mbind,
+        addr,
+        len,
+        mode,
+        nodemask,
+        maxnode,
+        flags
+    );
+}
+
+static
+unsigned
+cpu_id_bits(unsigned nr_shards) {
+    int w = std::bit_width(nr_shards - 1);
+    // Preserve at least 8 bits for CPU ID to have a traditional memory map
+    return std::max(w, 8);
+}
+
+size_t
+internal::per_shard_memory(size_t mem, unsigned procs) {
+    // limit memory address to fit in 36-bit, see Memory map
+    size_t max_mem_per_proc = 1UL << cpu_id_shift;
+    auto mem_per_proc = std::min(align_down<size_t>(mem / procs, 2 << 20), max_mem_per_proc);
+    return mem_per_proc;
+}
+
+void
+internal::global_setup(unsigned nr_shards) {
+    cpu_id_shift = bits_for_cpu_id_and_memory - cpu_id_bits(nr_shards);
+    cpu_id_and_mem_base_mask = ~((uintptr_t(1) << cpu_id_shift) - 1);
 }
 
 internal::numa_layout
@@ -1835,11 +1918,11 @@ configure(std::vector<resource::memory> m, bool mbind,
     get_cpu_mem().resize(total, sys_alloc);
     size_t pos = 0;
     for (auto&& x : m) {
-#ifdef SEASTAR_HAVE_NUMA
         unsigned long nodemask = 1UL << x.nodeid;
         if (mbind) {
             auto start = get_cpu_mem().mem() + pos;
-            auto r = ::mbind(start, x.bytes,
+            auto r = seastar::memory::mbind(
+                            start, x.bytes,
                             MPOL_PREFERRED,
                             &nodemask, std::numeric_limits<unsigned long>::digits,
                             MPOL_MF_MOVE);
@@ -1856,7 +1939,6 @@ configure(std::vector<resource::memory> m, bool mbind,
             }
             ret_layout.ranges.push_back({.start = start, .end = start + x.bytes, .numa_node_id = x.nodeid});
         }
-#endif
         pos += x.bytes;
     }
     return ret_layout;
@@ -1990,11 +2072,7 @@ seastar::internal::log_buf::inserter_iterator do_dump_memory_diagnostics(seastar
 
     if (additional_diagnostics_producer) {
         additional_diagnostics_producer([&it] (std::string_view v) mutable {
-#if FMT_VERSION >= 80000
             it = fmt::format_to(it, fmt::runtime(v));
-#else
-            it = fmt::format_to(it, v);
-#endif
         });
     }
 
@@ -2125,7 +2203,7 @@ void maybe_dump_memory_diagnostics(size_t size, bool is_aborting) {
 void on_allocation_failure(size_t size) {
     alloc_stats::increment(alloc_stats::types::failed_allocs);
 
-    bool will_abort = !abort_on_alloc_failure_suppressed
+    bool will_abort = !internal::abort_on_alloc_failure_suppressed
             && abort_on_allocation_failure.load(std::memory_order_relaxed);
 
     maybe_dump_memory_diagnostics(size, will_abort);
@@ -2211,12 +2289,26 @@ void __libc_free(void* obj) noexcept;
 
 extern "C"
 [[gnu::visibility("default")]]
+[[gnu::used]]
+void free_sized(void* ptr, size_t size) {
+    seastar::memory::free(ptr, size);
+}
+
+extern "C"
+[[gnu::visibility("default")]]
+[[gnu::used]]
+void free_aligned_sized(void* ptr, size_t alignment, size_t size) {
+    seastar::memory::free_aligned(ptr, alignment, size);
+}
+
+extern "C"
+[[gnu::visibility("default")]]
 void* calloc(size_t nmemb, size_t size) {
     if (try_trigger_error_injector()) {
         return nullptr;
     }
     auto s1 = __int128(nmemb) * __int128(size);
-    assert(s1 == size_t(s1));
+    SEASTAR_ASSERT(s1 == size_t(s1));
     size_t s = s1;
     auto p = malloc(s);
     if (p) {
@@ -2254,8 +2346,6 @@ void* realloc(void* ptr, size_t size) {
         abort();
     }
     // if we're here, it's a non-null seastar memory ptr
-    // or original functions aren't available.
-    // at any rate, using the seastar allocator is OK now.
     auto old_size = ptr ? object_size(ptr) : 0;
     if (size == old_size) {
         return ptr;
@@ -2264,10 +2354,16 @@ void* realloc(void* ptr, size_t size) {
         ::free(ptr);
         return nullptr;
     }
-    if (size < old_size) {
+    if (size < old_size && cpu_pages::is_local_pointer(ptr)) {
+        // local pointers can sometimes be shrunk by returning freed
+        // pages to the buddy allocator
         seastar::memory::shrink(ptr, size);
         return ptr;
     }
+
+    // either a request to realloc larger than the existing allocation size
+    // or a cross-shard pointer: in either case we allocate a new local
+    // pointer and copy the contents
     auto nptr = malloc(size);
     if (!nptr) {
         return nptr;
@@ -2318,11 +2414,13 @@ int __libc_posix_memalign(void** ptr, size_t align, size_t size) noexcept;
 extern "C"
 [[gnu::visibility("default")]]
 [[gnu::malloc]]
-#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 30)
+#if defined(__GLIBC__)
+#if __GLIBC_PREREQ(2, 30)
 [[gnu::alloc_size(2)]]
 #endif
-#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 35)
+#if __GLIBC_PREREQ(2, 35)
 [[gnu::alloc_align(1)]]
+#endif
 #endif
 void* memalign(size_t align, size_t size) noexcept {
     if (try_trigger_error_injector()) {
@@ -2345,11 +2443,13 @@ extern "C"
 [[gnu::alias("memalign")]]
 [[gnu::visibility("default")]]
 [[gnu::malloc]]
-#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 30)
+#if defined(__GLIBC__)
+#if __GLIBC_PREREQ(2, 30)
 [[gnu::alloc_size(2)]]
 #endif
-#if defined(__GLIBC__) && __GLIBC_PREREQ(2, 35)
+#if __GLIBC_PREREQ(2, 35)
 [[gnu::alloc_align(1)]]
+#endif
 #endif
 void* __libc_memalign(size_t align, size_t size) noexcept;
 
@@ -2467,8 +2567,6 @@ void operator delete[](void* ptr, size_t size, std::nothrow_t) noexcept {
     seastar::memory::free(ptr, size);
 }
 
-#ifdef __cpp_aligned_new
-
 extern "C++"
 [[gnu::visibility("default")]]
 void* operator new(size_t size, std::align_val_t a) {
@@ -2543,8 +2641,6 @@ void operator delete[](void* ptr, std::align_val_t a, const std::nothrow_t&) noe
     seastar::memory::free(ptr);
 }
 
-#endif
-
 namespace seastar {
 
 #else
@@ -2609,6 +2705,9 @@ configure(std::vector<resource::memory> m, bool mbind,
     return {};
 }
 
+void configure_minimal()
+{}
+
 statistics stats() {
     return statistics{0, 0, 0, 1 << 30, 1 << 30, 0, 0, 0, 0, 0, 0};
 }
@@ -2664,9 +2763,43 @@ sstring generate_memory_diagnostics_report() {
     return {};
 }
 
+size_t
+internal::per_shard_memory(size_t total_memory, unsigned nr_shards) {
+    return align_down<size_t>(total_memory / nr_shards, 2 << 20);
+}
+
+void
+internal::global_setup(unsigned nr_shards) {
+}
+
+void free(void* ptr, size_t size) {
+    ::free(ptr);
 }
 
 }
+
+}
+
+#if !(__GLIBC__ == 2 && __GLIBC_MINOR__ >= 43) && !(__GLIBC__ > 2)
+
+// glibc 2.43 or later defines free_sized and free_aligned_sized, while we want to use
+// it even earlier
+
+extern "C"
+[[gnu::visibility("default")]]
+[[gnu::used]]
+void free_sized(void* ptr, size_t size) {
+    ::free(ptr);
+}
+
+extern "C"
+[[gnu::visibility("default")]]
+[[gnu::used]]
+void free_aligned_sized(void* ptr, size_t alignment, size_t size) {
+    ::free(ptr);
+}
+
+#endif
 
 namespace seastar {
 

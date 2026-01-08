@@ -129,6 +129,24 @@ find_package_handle_standard_args (dpdk
   REQUIRED_VARS
     ${dpdk_REQUIRED})
 
+# DPDK's build system adds certain dependencies conditionally based on what's available
+# at build time. While most libraries from dpdk_PC_LIBRARIES are handled through the
+# rte_libs logic elsewhere, external dependencies ('bsd' and 'numa' in this case) are
+# explicitly handled below. This foreach loop checks if these specific libraries are
+# present in dpdk_PC_LIBRARIES and adds them to the dpdk_dependencies list if found.
+foreach (lib "bsd" "numa")
+  if (lib IN_LIST dpdk_PC_STATIC_LIBRARIES)
+    list (APPEND dpdk_dependencies ${lib})
+  endif()
+endforeach ()
+
+# As of DPDK 23.07, if libarchive-dev is present, it will make DPDK depend on the library.
+# Unfortunately DPDK also has a bug in its .pc file generation and will not include libarchive
+# dependency under any circumstance. Accordingly, the dependency is added explicitly if libarchive
+# exists.
+pkg_check_modules (libarchive_PC QUIET libarchive)
+list(APPEND dpdk_dependencies ${libarchive_PC_LIBRARIES})
+
 if (dpdk_FOUND AND NOT (TARGET dpdk))
   get_filename_component (library_suffix "${dpdk_EAL_LIBRARY}" LAST_EXT)
   # strictly speaking, we should have being using check_c_compiler_flag()
@@ -163,11 +181,12 @@ if (dpdk_FOUND AND NOT (TARGET dpdk))
     set_target_properties (dpdk
       PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES ${dpdk_INCLUDE_DIR}
+        INTERFACE_LINK_LIBRARIES "${dpdk_dependencies}"
         IMPORTED_OBJECTS ${dpdk_object_path}
         ${compile_options})
-    # we include dpdk in seastar already, so no need to expose it with
-    # dpdk_LIBRARIES
-    set (dpdk_LIBRARIES "")
+    # we include dpdk in seastar already, but we need to pull in the
+    # dependency libraries linked by dpdk
+    list(TRANSFORM dpdk_dependencies PREPEND "-l" OUTPUT_VARIABLE dpdk_LIBRARIES)
     add_library (DPDK::dpdk ALIAS dpdk)
   else ()
     set (dpdk_LIBRARIES ${dpdk_PC_LDFLAGS})
@@ -175,7 +194,7 @@ if (dpdk_FOUND AND NOT (TARGET dpdk))
     set_target_properties (DPDK::dpdk
       PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES "${dpdk_PC_INCLUDE_DIRS}"
-        INTERFACE_LINK_LIBRARIES "${_dpdk_libraries}"
+        INTERFACE_LINK_LIBRARIES "${_dpdk_libraries};${dpdk_dependencies}"
         ${compile_options})
   endif()
 endif ()

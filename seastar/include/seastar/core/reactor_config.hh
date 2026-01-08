@@ -21,19 +21,28 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
-#include <chrono>
-#endif
 #include <seastar/util/program-options.hh>
 #include <seastar/util/memory_diagnostics.hh>
-#include <seastar/util/modules.hh>
+#include <seastar/core/scheduling.hh>
 
 namespace seastar {
 
 /// \cond internal
 struct reactor_config {
+    sched_clock::duration task_quota;
+    std::chrono::nanoseconds max_poll_time;
+    bool handle_sigint = true;
     bool auto_handle_sigint_sigterm = true;
     unsigned max_networking_aio_io_control_blocks = 10000;
+    bool force_io_getevents_syscall = false;
+    bool kernel_page_cache = false;
+    bool have_aio_fsync = false;
+    unsigned max_task_backlog = 1000;
+    bool strict_o_direct = true;
+    bool bypass_fsync = false;
+    bool no_poll_aio = false;
+    bool aio_nowait_works = false;
+    bool abort_on_too_long_task_queue = false;
 };
 /// \endcond
 
@@ -41,7 +50,6 @@ class reactor_backend_selector;
 class network_stack_factory;
 
 /// Configuration for the reactor.
-SEASTAR_MODULE_EXPORT
 struct reactor_options : public program_options::option_group {
     /// \brief Select network stack to use.
     ///
@@ -77,6 +85,11 @@ struct reactor_options : public program_options::option_group {
     ///
     /// Default: 1.1
     program_options::value<double> io_flow_ratio_threshold;
+    /// \brief If an IO request is executed longer than that, this is printed to
+    /// logs with extra debugging
+    ///
+    /// Default: infinite (detection is OFF)
+    program_options::value<unsigned> io_completion_notify_ms;
     /// \brief Maximum number of task backlog to allow.
     ///
     /// When the number of tasks grow above this, we stop polling (e.g. I/O)
@@ -121,6 +134,8 @@ struct reactor_options : public program_options::option_group {
     program_options::value<> overprovisioned;
     /// \brief Abort when seastar allocator cannot allocate memory.
     program_options::value<> abort_on_seastar_bad_alloc;
+    /// \brief Abort when a task queue becomes too long.
+    program_options::value<bool> abort_on_too_long_task_queue;
     /// \brief Force \p io_getevents(2) to issue a system call, instead of
     /// bypassing the kernel when possible.
     ///
@@ -157,6 +172,16 @@ struct reactor_options : public program_options::option_group {
     ///
     /// Default: 10000.
     program_options::value<unsigned> max_networking_io_control_blocks;
+    /// \brief Leave this many I/O control blocks (IOCBs) as reserve.
+    ///
+    /// This is to allows leaving a (small) reserve aside so other applications
+    /// also using IOCBs can run alongside the seastar application.
+    /// The reserve takes precedence over \ref max_networking_io_control_blocks.
+    ///
+    /// Default: 0
+    ///
+    /// \see max_networking_io_control_blocks
+    program_options::value<unsigned> reserve_io_control_blocks;
     /// \brief Enable seastar heap profiling.
     ///
     /// Allocations will be sampled every N bytes on average. Zero means off.

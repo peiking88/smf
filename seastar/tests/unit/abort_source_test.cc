@@ -19,12 +19,16 @@
  * Copyright (C) 2017 ScyllaDB
  */
 
+#include <exception>
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 
 #include <seastar/core/gate.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/do_with.hh>
+#include <seastar/core/abort_on_expiry.hh>
+#include <seastar/util/defer.hh>
+#include <seastar/util/later.hh>
 
 using namespace seastar;
 using namespace std::chrono_literals;
@@ -194,4 +198,125 @@ SEASTAR_THREAD_TEST_CASE(test_request_abort_twice) {
     as.request_abort_ex(std::runtime_error(""));
     as.request_abort();
     BOOST_REQUIRE_THROW(as.check(), std::runtime_error);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_on_abort_call_after_abort) {
+    std::exception_ptr signalled_ex;
+    auto as = abort_source();
+    auto sub = as.subscribe([&] (const std::optional<std::exception_ptr>& ex) noexcept {
+        BOOST_REQUIRE(!signalled_ex);
+        signalled_ex = *ex;
+    });
+    BOOST_REQUIRE_EQUAL(bool(sub), true);
+    BOOST_REQUIRE(signalled_ex == nullptr);
+
+    // on_abort should trigger the subscribed callback
+    as.request_abort_ex(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE_EQUAL(bool(sub), false);
+    BOOST_REQUIRE(signalled_ex != nullptr);
+    BOOST_REQUIRE_THROW(std::rethrow_exception(signalled_ex), std::runtime_error);
+
+    // on_abort is single-shot
+    signalled_ex = nullptr;
+    sub->on_abort(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE(signalled_ex == nullptr);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_on_abort_call_before_abort) {
+    std::exception_ptr signalled_ex;
+    auto as = abort_source();
+    auto sub = as.subscribe([&] (const std::optional<std::exception_ptr>& ex) noexcept {
+        BOOST_REQUIRE(!signalled_ex);
+        signalled_ex = *ex;
+    });
+    BOOST_REQUIRE_EQUAL(bool(sub), true);
+    BOOST_REQUIRE(signalled_ex == nullptr);
+
+    // on_abort should trigger the subscribed callback
+    sub->on_abort(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE_EQUAL(bool(sub), false);
+    BOOST_REQUIRE(signalled_ex != nullptr);
+    BOOST_REQUIRE_THROW(std::rethrow_exception(signalled_ex), std::runtime_error);
+
+    // subscription is single-shot
+    signalled_ex = nullptr;
+    as.request_abort_ex(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE(signalled_ex == nullptr);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_subscribe_aborted_source) {
+    std::exception_ptr signalled_ex;
+    auto as = abort_source();
+    as.request_abort();
+    auto sub = as.subscribe([&] (const std::optional<std::exception_ptr>& ex) noexcept {
+        BOOST_REQUIRE(!signalled_ex);
+        signalled_ex = *ex;
+    });
+
+    // subscription is expected to evaluate to false
+    // if abort_source was already aborted
+    BOOST_REQUIRE_EQUAL(bool(sub), false);
+    BOOST_REQUIRE(signalled_ex == nullptr);
+
+    // on_abort should trigger the subscribed callback
+    // if abort_source was already aborted
+    sub->on_abort(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE(signalled_ex != nullptr);
+    BOOST_REQUIRE_THROW(std::rethrow_exception(signalled_ex), std::runtime_error);
+
+    // on_abort is single-shot
+    signalled_ex = nullptr;
+    sub->on_abort(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE(signalled_ex == nullptr);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_subscription_callback_lifetime) {
+    // The subscription callback function needs to be destroyed
+    // only when the subscription is destroyed.
+    bool callback_destroyed = false;
+    int callback_called = 0;
+    auto when_destroyed = deferred_action([&callback_destroyed] () noexcept { callback_destroyed = true; });
+    auto as = abort_source();
+    auto sub = std::make_unique<optimized_optional<abort_source::subscription>>(as.subscribe([&, when_destroyed = std::move(when_destroyed)] (const std::optional<std::exception_ptr>& ex) noexcept {
+        callback_called++;
+    }));
+    BOOST_REQUIRE_EQUAL(bool(sub), true);
+    BOOST_REQUIRE_EQUAL(bool(*sub), true);
+    BOOST_REQUIRE_EQUAL(callback_destroyed, false);
+    BOOST_REQUIRE_EQUAL(callback_called, 0);
+
+    // on_abort should trigger the subscribed callback
+    as.request_abort_ex(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE_EQUAL(bool(*sub), false);
+    BOOST_REQUIRE_EQUAL(callback_destroyed, false);
+    BOOST_REQUIRE_EQUAL(callback_called, 1);
+
+    // on_abort is single-shot
+    (*sub)->on_abort(std::make_exception_ptr(std::runtime_error("signaled")));
+    BOOST_REQUIRE_EQUAL(callback_destroyed, false);
+    BOOST_REQUIRE_EQUAL(callback_called, 1);
+
+    sub.reset();
+    BOOST_REQUIRE_EQUAL(callback_destroyed, true);
+    BOOST_REQUIRE_EQUAL(callback_called, 1);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_abort_on_expiry) {
+    auto abort = abort_on_expiry<manual_clock>(manual_clock::now() + 1s);
+    std::exception_ptr ex;
+    int called = 0;
+    auto sub = abort.abort_source().subscribe([&] (const std::optional<std::exception_ptr>& ex_opt) noexcept {
+        called++;
+        if (ex_opt) {
+            ex = *ex_opt;
+        }
+    });
+    BOOST_REQUIRE(!abort.abort_source().abort_requested());
+    BOOST_REQUIRE(!called);
+    manual_clock::advance(1s);
+    yield().get();
+    BOOST_REQUIRE(abort.abort_source().abort_requested());
+    BOOST_REQUIRE_EQUAL(called, 1);
+    BOOST_REQUIRE(ex != nullptr);
+    BOOST_REQUIRE_THROW(std::rethrow_exception(ex), timed_out_error);
 }

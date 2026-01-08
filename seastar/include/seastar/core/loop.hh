@@ -22,7 +22,6 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
 #include <cassert>
 #include <cstddef>
 #include <iterator>
@@ -30,16 +29,14 @@
 #include <optional>
 #include <type_traits>
 #include <vector>
-#endif
 #include <seastar/core/future.hh>
 #include <seastar/core/task.hh>
+#include <seastar/util/assert.hh>
 #include <seastar/util/bool_class.hh>
-#include <seastar/util/modules.hh>
 #include <seastar/core/semaphore.hh>
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 /// \addtogroup future-util
 /// @{
@@ -67,7 +64,7 @@ public:
             delete this;
             return;
         } else {
-            if (_state.get0() == stop_iteration::yes) {
+            if (_state.get() == stop_iteration::yes) {
                 _promise.set_value();
                 delete this;
                 return;
@@ -81,7 +78,7 @@ public:
                     internal::set_callback(std::move(f), this);
                     return;
                 }
-                if (f.get0() == stop_iteration::yes) {
+                if (f.get() == stop_iteration::yes) {
                     _promise.set_value();
                     delete this;
                     return;
@@ -116,7 +113,7 @@ future<> repeat(AsyncAction& action) noexcept = delete;
 /// \return a ready future if we stopped successfully, or a failed future if
 ///         a call to to \c action failed.
 template<typename AsyncAction>
-SEASTAR_CONCEPT( requires std::is_invocable_r_v<stop_iteration, AsyncAction> || std::is_invocable_r_v<future<stop_iteration>, AsyncAction> )
+requires std::is_invocable_r_v<stop_iteration, AsyncAction> || std::is_invocable_r_v<future<stop_iteration>, AsyncAction>
 inline
 future<> repeat(AsyncAction&& action) noexcept {
     using futurator = futurize<std::invoke_result_t<AsyncAction>>;
@@ -135,7 +132,7 @@ future<> repeat(AsyncAction&& action) noexcept {
             }();
         }
 
-        if (f.get0() == stop_iteration::yes) {
+        if (f.get() == stop_iteration::yes) {
             return make_ready_future<>();
         }
     }
@@ -183,7 +180,7 @@ public:
             delete this;
             return;
         } else {
-            auto v = std::move(this->_state).get0();
+            auto v = std::move(this->_state).get();
             if (v) {
                 _promise.set_value(std::move(*v));
                 delete this;
@@ -198,7 +195,7 @@ public:
                     internal::set_callback(std::move(f), this);
                     return;
                 }
-                auto ret = f.get0();
+                auto ret = f.get();
                 if (ret) {
                     _promise.set_value(std::move(*ret));
                     delete this;
@@ -229,10 +226,10 @@ public:
 /// \return a ready future if we stopped successfully, or a failed future if
 ///         a call to to \c action failed.  The \c optional's value is returned.
 template<typename AsyncAction>
-SEASTAR_CONCEPT( requires requires (AsyncAction aa) {
-    bool(futurize_invoke(aa).get0());
-    futurize_invoke(aa).get0().value();
-} )
+requires requires (AsyncAction aa) {
+    bool(futurize_invoke(aa).get());
+    futurize_invoke(aa).get().value();
+}
 repeat_until_value_return_type<AsyncAction>
 repeat_until_value(AsyncAction action) noexcept {
     using futurator = futurize<std::invoke_result_t<AsyncAction>>;
@@ -257,7 +254,7 @@ repeat_until_value(AsyncAction action) noexcept {
             return make_exception_future<value_type>(f.get_exception());
         }
 
-        optional_type&& optional = std::move(f).get0();
+        optional_type&& optional = std::move(f).get();
         if (optional) {
             return make_ready_future<value_type>(std::move(optional.value()));
         }
@@ -334,7 +331,7 @@ public:
 /// \return a ready future if we stopped successfully, or a failed future if
 ///         a call to to \c action or a call to \c stop_cond failed.
 template<typename AsyncAction, typename StopCondition>
-SEASTAR_CONCEPT( requires std::is_invocable_r_v<bool, StopCondition> && std::is_invocable_r_v<future<>, AsyncAction> )
+requires std::is_invocable_r_v<bool, StopCondition> && std::is_invocable_r_v<future<>, AsyncAction>
 inline
 future<> do_until(StopCondition stop_cond, AsyncAction action) noexcept {
     using namespace internal;
@@ -370,7 +367,7 @@ future<> do_until(StopCondition stop_cond, AsyncAction action) noexcept {
 ///        that becomes ready when you wish it to be called again.
 /// \return a future<> that will resolve to the first failure of \c action
 template<typename AsyncAction>
-SEASTAR_CONCEPT( requires std::is_invocable_r_v<future<>, AsyncAction> )
+requires std::is_invocable_r_v<future<>, AsyncAction>
 inline
 future<> keep_doing(AsyncAction action) noexcept {
     return repeat([action = std::move(action)] () mutable {
@@ -381,15 +378,15 @@ future<> keep_doing(AsyncAction action) noexcept {
 }
 
 namespace internal {
-template <typename Iterator, typename AsyncAction>
+template <typename Iterator, class Sentinel, typename AsyncAction>
 class do_for_each_state final : public continuation_base<> {
     Iterator _begin;
-    Iterator _end;
+    Sentinel _end;
     AsyncAction _action;
     promise<> _pr;
 
 public:
-    do_for_each_state(Iterator begin, Iterator end, AsyncAction action, future<>&& first_unavailable)
+    do_for_each_state(Iterator begin, Sentinel end, AsyncAction action, future<>&& first_unavailable)
         : _begin(std::move(begin)), _end(std::move(end)), _action(std::move(action)) {
         internal::set_callback(std::move(first_unavailable), this);
     }
@@ -422,16 +419,16 @@ public:
     }
 };
 
-template<typename Iterator, typename AsyncAction>
+template<typename Iterator, typename Sentinel, typename AsyncAction>
 inline
-future<> do_for_each_impl(Iterator begin, Iterator end, AsyncAction action) {
+future<> do_for_each_impl(Iterator begin, Sentinel end, AsyncAction action) {
     while (begin != end) {
         auto f = futurize_invoke(action, *begin++);
         if (f.failed()) {
             return f;
         }
         if (!f.available() || need_preempt()) {
-            auto* s = new internal::do_for_each_state<Iterator, AsyncAction>{
+            auto* s = new internal::do_for_each_state<Iterator, Sentinel, AsyncAction>{
                 std::move(begin), std::move(end), std::move(action), std::move(f)};
             return s->get_future();
         }
@@ -454,12 +451,15 @@ future<> do_for_each_impl(Iterator begin, Iterator end, AsyncAction action) {
 ///               when it is acceptable to process the next item.
 /// \return a ready future on success, or the first failed future if
 ///         \c action failed.
-template<typename Iterator, typename AsyncAction>
-SEASTAR_CONCEPT( requires requires (Iterator i, AsyncAction aa) {
-    { futurize_invoke(aa, *i) } -> std::same_as<future<>>;
-} )
+template<typename Iterator, typename Sentinel, typename AsyncAction>
+requires (
+    requires (Iterator i, AsyncAction aa) {
+        { futurize_invoke(aa, *i) } -> std::same_as<future<>>;
+    } &&
+    (std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>)
+)
 inline
-future<> do_for_each(Iterator begin, Iterator end, AsyncAction action) noexcept {
+future<> do_for_each(Iterator begin, Sentinel end, AsyncAction action) noexcept {
     try {
         return internal::do_for_each_impl(std::move(begin), std::move(end), std::move(action));
     } catch (...) {
@@ -472,19 +472,19 @@ future<> do_for_each(Iterator begin, Iterator end, AsyncAction action) noexcept 
 /// For each item in a range, call a function, waiting for the previous
 /// invocation to complete before calling the next one.
 ///
-/// \param c an \c Container object designating input range
+/// \param c an \c Range object designating input range
 /// \param action a callable, taking a reference to objects from the range
 ///               as a parameter, and returning a \c future<> that resolves
 ///               when it is acceptable to process the next item.
 /// \return a ready future on success, or the first failed future if
 ///         \c action failed.
-template<typename Container, typename AsyncAction>
-SEASTAR_CONCEPT( requires requires (Container c, AsyncAction aa) {
+template<typename Range, typename AsyncAction>
+requires requires (Range c, AsyncAction aa) {
     { futurize_invoke(aa, *std::begin(c)) } -> std::same_as<future<>>;
     std::end(c);
-} )
+}
 inline
-future<> do_for_each(Container& c, AsyncAction action) noexcept {
+future<> do_for_each(Range& c, AsyncAction action) noexcept {
     try {
         return internal::do_for_each_impl(std::begin(c), std::end(c), std::move(action));
     } catch (...) {
@@ -500,17 +500,20 @@ struct has_iterator_category : std::false_type {};
 template <typename T>
 struct has_iterator_category<T, std::void_t<typename std::iterator_traits<T>::iterator_category >> : std::true_type {};
 
-template <typename Iterator, typename Sentinel, typename IteratorCategory>
+template <typename Iterator, typename Sentinel>
 inline
 size_t
-iterator_range_estimate_vector_capacity(Iterator begin, Sentinel end, IteratorCategory) {
-    // May be linear time below random_access_iterator_tag, but still better than reallocation
-    if constexpr (std::is_base_of_v<std::forward_iterator_tag, IteratorCategory>) {
-        return std::distance(begin, end);
+iterator_range_estimate_vector_capacity(Iterator begin, Sentinel end) {
+    if constexpr (std::forward_iterator<Iterator> &&
+                  std::forward_iterator<Sentinel>) {
+        return std::ranges::distance(begin, end);
+    } else if constexpr (std::random_access_iterator<Iterator> &&
+                         std::random_access_iterator<Sentinel>) {
+        return std::ranges::distance(begin, end);
+    } else {
+        // For InputIterators we can't estimate needed capacity
+        return 0;
     }
-
-    // For InputIterators we can't estimate needed capacity
-    return 0;
 }
 
 } // namespace internal
@@ -556,7 +559,7 @@ public:
 ///       current shard. If you want to run a function on all shards in parallel,
 ///       have a look at \ref smp::invoke_on_all() instead.
 template <typename Iterator, typename Sentinel, typename Func>
-SEASTAR_CONCEPT( requires (requires (Func f, Iterator i) { { f(*i) } -> std::same_as<future<>>; { i++ }; } && (std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>)))
+requires (requires (Func f, Iterator i) { { f(*i) } -> std::same_as<future<>>; { i++ }; } && (std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>))
 // We use a conjunction with std::same_as<Sentinel, Iterator> because std::sentinel_for requires Sentinel to be semiregular,
 // which implies that it requires Sentinel to be default-constructible, which is unnecessarily strict in below's context and could
 // break legacy code, for which it holds that Sentinel equals Iterator.
@@ -574,12 +577,11 @@ parallel_for_each(Iterator begin, Sentinel end, Func&& func) noexcept {
         memory::scoped_critical_alloc_section _;
         if (!f.available() || f.failed()) {
             if (!s) {
-                using itraits = std::iterator_traits<Iterator>;
                 size_t n{0U};
                 if constexpr (internal::has_iterator_category<Iterator>::value) {
                     // We need if-constexpr here because there exist iterators for which std::iterator_traits
                     // does not have 'iterator_category' as member type
-                    n = (internal::iterator_range_estimate_vector_capacity(begin, end, typename itraits::iterator_category{}) + 1);
+                    n = (internal::iterator_range_estimate_vector_capacity(begin, end) + 1);
                 }
                 s = new parallel_for_each_state(n);
             }
@@ -629,10 +631,10 @@ parallel_for_each_impl(Range&& range, Func&& func) {
 } // namespace internal
 
 template <typename Range, typename Func>
-SEASTAR_CONCEPT( requires requires (Func f, Range r) {
+requires requires (Func f, Range r) {
     { f(*std::begin(r)) } -> std::same_as<future<>>;
     std::end(r);
-} )
+}
 inline
 future<>
 parallel_for_each(Range&& range, Func&& func) noexcept {
@@ -662,7 +664,7 @@ parallel_for_each(Range&& range, Func&& func) noexcept {
 ///       current shard. If you want to run a function on all shards in parallel,
 ///       have a look at \ref smp::invoke_on_all() instead.
 template <typename Iterator, typename Sentinel, typename Func>
-SEASTAR_CONCEPT( requires (requires (Func f, Iterator i) { { f(*i) } -> std::same_as<future<>>; { ++i }; } && (std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>) ) )
+requires (requires (Func f, Iterator i) { { f(*i) } -> std::same_as<future<>>; { ++i }; } && (std::same_as<Sentinel, Iterator> || std::sentinel_for<Sentinel, Iterator>) )
 // We use a conjunction with std::same_as<Sentinel, Iterator> because std::sentinel_for requires Sentinel to be semiregular,
 // which implies that it requires Sentinel to be default-constructible, which is unnecessarily strict in below's context and could
 // break legacy code, for which it holds that Sentinel equals Iterator.
@@ -687,7 +689,7 @@ max_concurrent_for_each(Iterator begin, Sentinel end, size_t max_concurrent, Fun
         { }
     };
 
-    assert(max_concurrent > 0);
+    SEASTAR_ASSERT(max_concurrent > 0);
 
     try {
         return do_with(state(std::move(begin), std::move(end), max_concurrent, std::forward<Func>(func)), [] (state& s) {
@@ -743,10 +745,10 @@ max_concurrent_for_each(Iterator begin, Sentinel end, size_t max_concurrent, Fun
 ///       current shard. If you want to run a function on all shards in parallel,
 ///       have a look at \ref smp::invoke_on_all() instead.
 template <typename Range, typename Func>
-SEASTAR_CONCEPT( requires requires (Func f, Range r) {
+requires requires (Func f, Range r) {
     { f(*std::begin(r)) } -> std::same_as<future<>>;
     std::end(r);
-} )
+}
 inline
 future<>
 max_concurrent_for_each(Range&& range, size_t max_concurrent, Func&& func) noexcept {
@@ -759,6 +761,5 @@ max_concurrent_for_each(Range&& range, size_t max_concurrent, Func&& func) noexc
 
 /// @}
 
-SEASTAR_MODULE_EXPORT_END
 
 } // namespace seastar

@@ -21,18 +21,13 @@
 
 #pragma once
 
-#include <seastar/util/concepts.hh>
-#include <seastar/util/std-compat.hh>
-#include <seastar/util/modules.hh>
-#ifndef SEASTAR_MODULE
+#include <concepts>
 #include <iostream>
-#include <memory>
+#include <optional>
 #include <type_traits>
-#endif
+#include <fmt/core.h>
 
 namespace seastar {
-
-SEASTAR_CONCEPT(
 
 template<typename T>
 concept OptimizableOptional =
@@ -42,13 +37,10 @@ concept OptimizableOptional =
             { bool(obj) } noexcept;
         };
 
-)
-
 /// \c optimized_optional<> is intended mainly for use with classes that store
 /// their data externally and expect pointer to this data to be always non-null.
 /// In such case there is no real need for another flag signifying whether
 /// the optional is engaged.
-SEASTAR_MODULE_EXPORT
 template<typename T>
 class optimized_optional {
     T _object;
@@ -70,8 +62,8 @@ public:
         return *this;
     }
     template<typename U>
-    std::enable_if_t<std::is_same_v<std::decay_t<U>, T>, optimized_optional&>
-    operator=(U&& obj) noexcept {
+    requires std::same_as<std::decay_t<U>, T>
+    optimized_optional& operator=(U&& obj) noexcept {
         _object = std::forward<U>(obj);
         return *this;
     }
@@ -103,3 +95,13 @@ public:
 };
 
 }
+
+template <typename T>
+struct fmt::formatter<seastar::optimized_optional<T>> : fmt::formatter<string_view> {
+    auto format(const seastar::optimized_optional<T>& opt, fmt::format_context& ctx) const {
+        if (opt) {
+            return fmt::format_to(ctx.out(), "{}", *opt);
+        }
+        return fmt::format_to(ctx.out(), "null");
+    }
+};

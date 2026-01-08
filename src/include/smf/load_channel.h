@@ -2,6 +2,8 @@
 //
 #pragma once
 
+#include <cstdint>
+#include <seastar/core/loop.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/net/tls.hh>
 
@@ -71,14 +73,19 @@ struct load_channel {
     // explicitly make copies of opts, gen, and func
     // happens once per reqs call
     //
-    return seastar::do_for_each(
-      boost::counting_iterator<uint32_t>(0),
-      boost::counting_iterator<uint32_t>(reqs),
-      [this, opts, stats, gen, func](uint32_t i) mutable {
+    return seastar::do_with(uint32_t{0}, [this, reqs, opts, stats, gen, func](uint32_t& i) mutable {
+      return seastar::repeat([this, &i, reqs, opts, stats, gen, func]() mutable {
+        if (i >= reqs) {
+          return seastar::make_ready_future<seastar::stop_iteration>(seastar::stop_iteration::yes);
+        }
         auto e = gen(opts);
         stats->total_bytes += e.size();
-        return func(client.get(), std::move(e));
+        ++i;
+        return func(client.get(), std::move(e)).then([] {
+          return seastar::stop_iteration::no;
+        });
       });
+    });
   }
   uint64_t channel_id_ = 0;
   seastar::shared_ptr<ClientService> client;

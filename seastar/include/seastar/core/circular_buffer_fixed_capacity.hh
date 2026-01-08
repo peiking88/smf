@@ -28,13 +28,14 @@
 // Similar to libstdc++'s std::deque, except that it uses a single level
 // store, and so is more efficient for simple stored items.
 
-#ifndef SEASTAR_MODULE
+#include <algorithm>
 #include <type_traits>
 #include <cstddef>
 #include <iterator>
 #include <utility>
-#include <seastar/util/modules.hh>
-#endif
+#include <memory>
+
+#include <seastar/core/bitops.hh>
 
 /// \file
 
@@ -47,7 +48,6 @@ namespace seastar {
 ///
 /// \tparam T type of objects stored in the container; must be noexcept move enabled
 /// \tparam Capacity maximum number of objects that can be stored in the container; must be a power of 2
-SEASTAR_MODULE_EXPORT
 template <typename T, size_t Capacity>
 class circular_buffer_fixed_capacity {
     size_t _begin = 0;
@@ -224,11 +224,7 @@ template <typename T, size_t Capacity>
 inline
 circular_buffer_fixed_capacity<T, Capacity>::circular_buffer_fixed_capacity(circular_buffer_fixed_capacity&& x) noexcept
         : _begin(x._begin), _end(x._end) {
-    // This is std::uninitialized_move, but that is c++17 only
-    auto dest = begin();
-    for (auto& obj : x) {
-        new (&*dest++) T(std::move(obj));
-    }
+    std::uninitialized_move(x.begin(), x.end(), begin());
 }
 
 template <typename T, size_t Capacity>
@@ -351,7 +347,7 @@ circular_buffer_fixed_capacity<T, Capacity>::erase(iterator first, iterator last
         auto new_start = std::move_backward(begin(), first, last);
         auto i = begin();
         while (i < new_start) {
-            *i++.~T();
+            i++->~T();
         }
         _begin = new_start.idx;
         return last;
@@ -360,7 +356,7 @@ circular_buffer_fixed_capacity<T, Capacity>::erase(iterator first, iterator last
         auto i = new_end;
         auto e = end();
         while (i < e) {
-            *i++.~T();
+            i++->~T();
         }
         _end = new_end.idx;
         return first;
@@ -375,6 +371,14 @@ circular_buffer_fixed_capacity<T, Capacity>::clear() {
         obj.~T();
     }
     _begin = _end = 0;
+}
+
+// Return a circular_buffer power-of-2 capacity
+// For fitting an array of T entries in Capacity bytes.
+template <typename T, size_t Capacity>
+requires (sizeof(T) <= Capacity)
+constexpr inline size_t calc_circular_buffer_capacity() {
+    return 1 << (log2ceil(Capacity) - log2ceil(sizeof(T)));
 }
 
 }

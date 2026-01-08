@@ -21,15 +21,14 @@
 
 #pragma once
 
+
 /// \file
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 using shard_id = unsigned;
 
-SEASTAR_MODULE_EXPORT_END
 
 namespace internal {
 
@@ -44,14 +43,12 @@ inline shard_id* this_shard_id_ptr() noexcept {
 
 } // namespace internal
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 /// Returns shard_id of the of the current shard.
 inline shard_id this_shard_id() noexcept {
     return *internal::this_shard_id_ptr();
 }
 
-SEASTAR_MODULE_EXPORT_END
 
 
 } // namespace seastar

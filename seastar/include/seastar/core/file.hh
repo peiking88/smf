@@ -22,10 +22,8 @@
 #pragma once
 
 #include <seastar/util/std-compat.hh>
-#ifdef SEASTAR_COROUTINES_ENABLED
 #include <seastar/core/coroutine.hh>
 #include <seastar/coroutine/generator.hh>
-#endif
 #include <seastar/core/do_with.hh>
 #include <seastar/core/stream.hh>
 #include <seastar/core/sstring.hh>
@@ -33,11 +31,11 @@
 #include <seastar/core/align.hh>
 #include <seastar/core/io_priority_class.hh>
 #include <seastar/core/file-types.hh>
-#include <seastar/core/circular_buffer.hh>
-#include <seastar/util/modules.hh>
-#ifndef SEASTAR_MODULE
+#include <seastar/core/circular_buffer_fixed_capacity.hh>
+
 #include <sys/statvfs.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <linux/fs.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -46,11 +44,9 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
-#endif
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 /// \addtogroup fileio-module
 /// @{
@@ -61,6 +57,14 @@ struct directory_entry {
     sstring name;
     /// Type of the directory entry, if known.
     std::optional<directory_entry_type> type;
+};
+
+/// Group details from the system group database
+struct group_details {
+    sstring group_name;
+    sstring group_passwd;
+    gid_t group_id;
+    std::vector<sstring> group_members;
 };
 
 /// Filesystem object stat information
@@ -96,6 +100,10 @@ struct file_open_options {
 
     // The fsxattr.fsx_extsize is 32-bit
     static constexpr uint64_t max_extent_allocation_size_hint = 1 << 31;
+
+    // XFS ignores hints that are not aligned to the logical block size.
+    // To fulfill the requirement, we ensure that hint is aligned to 128KB (best guess).
+    static constexpr uint32_t min_extent_size_hint_alignment{128u << 10}; // 128KB
 };
 
 class file;
@@ -104,6 +112,12 @@ class io_intent;
 class file_handle;
 class file_data_sink_impl;
 class file_data_source_impl;
+
+// The directory_entry size is 24 bytes (as the file name is allocated separately)
+// so the circular buffer is tuned to hold 16 entries
+constexpr size_t list_directory_generator_buffer_size = calc_circular_buffer_capacity<directory_entry, 512>();
+using list_directory_generator_type = coroutine::experimental::generator<directory_entry, directory_entry,
+        circular_buffer_fixed_capacity<directory_entry, list_directory_generator_buffer_size>>;
 
 // A handle that can be transported across shards and used to
 // create a dup(2)-like `file` object referring to the same underlying file
@@ -127,38 +141,15 @@ protected:
 public:
     virtual ~file_impl() {}
 
-#if SEASTAR_API_LEVEL >= 7
     virtual future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, io_intent*) = 0;
     virtual future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, io_intent*) = 0;
     virtual future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, io_intent*) = 0;
     virtual future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, io_intent*) = 0;
     virtual future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, io_intent*) = 0;
-#else
-    virtual future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc) = 0;
-    virtual future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) = 0;
-    virtual future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc) = 0;
-    virtual future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc) = 0;
-    virtual future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc) = 0;
-
-    virtual future<size_t> write_dma(uint64_t pos, const void* buffer, size_t len, const io_priority_class& pc, io_intent*) {
-        return write_dma(pos, buffer, len, pc);
-    }
-    virtual future<size_t> write_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc, io_intent*) {
-        return write_dma(pos, std::move(iov), pc);
-    }
-    virtual future<size_t> read_dma(uint64_t pos, void* buffer, size_t len, const io_priority_class& pc, io_intent*) {
-        return read_dma(pos, buffer, len, pc);
-    }
-    virtual future<size_t> read_dma(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc, io_intent*) {
-        return read_dma(pos, std::move(iov), pc);
-    }
-    virtual future<temporary_buffer<uint8_t>> dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc, io_intent*) {
-        return dma_read_bulk(offset, range_size, pc);
-    }
-#endif
 
     virtual future<> flush() = 0;
     virtual future<struct stat> stat() = 0;
+    virtual future<struct stat> statat(std::string_view name, int flags = 0);
     virtual future<> truncate(uint64_t length) = 0;
     virtual future<> discard(uint64_t offset, uint64_t length) = 0;
     virtual future<int> ioctl(uint64_t cmd, void* argp) noexcept;
@@ -170,11 +161,7 @@ public:
     virtual future<> close() = 0;
     virtual std::unique_ptr<file_handle_impl> dup();
     virtual subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next) = 0;
-#ifdef SEASTAR_COROUTINES_ENABLED
-    // due to https://github.com/scylladb/seastar/issues/1913, we cannot use
-    // buffered generator yet.
-    virtual coroutine::experimental::generator<directory_entry> experimental_list_directory();
-#endif
+    virtual list_directory_generator_type experimental_list_directory();
 };
 
 future<shared_ptr<file_impl>> make_file_impl(int fd, file_open_options options, int oflags, struct stat st) noexcept;
@@ -281,32 +268,6 @@ public:
         return _file_impl->_write_max_length;
     }
 
-#if SEASTAR_API_LEVEL < 7
-    /**
-     * Perform a single DMA read operation.
-     *
-     * @param aligned_pos offset to begin reading at (should be aligned)
-     * @param aligned_buffer output buffer (should be aligned)
-     * @param aligned_len number of bytes to read (should be aligned)
-     * @param pc the IO priority class under which to queue this operation
-     * @param intent the IO intention confirmation (\ref seastar::io_intent)
-     *
-     * Alignment is HW dependent but use 4KB alignment to be on the safe side as
-     * explained above.
-     *
-     * ATTN: The method is going to be deprecated
-     *
-     * @return number of bytes actually read
-     *         or exceptional future in case of I/O error
-     */
-    template <typename CharType>
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<size_t>
-    dma_read(uint64_t aligned_pos, CharType* aligned_buffer, size_t aligned_len, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_read_impl(aligned_pos, reinterpret_cast<uint8_t*>(aligned_buffer), aligned_len, internal::maybe_priority_class_ref(pc), intent);
-    }
-#endif
-
     /**
      * Perform a single DMA read operation.
      *
@@ -324,36 +285,8 @@ public:
     template <typename CharType>
     future<size_t>
     dma_read(uint64_t aligned_pos, CharType* aligned_buffer, size_t aligned_len, io_intent* intent = nullptr) noexcept {
-        return dma_read_impl(aligned_pos, reinterpret_cast<uint8_t*>(aligned_buffer), aligned_len, internal::maybe_priority_class_ref(), intent);
+        return dma_read_impl(aligned_pos, reinterpret_cast<uint8_t*>(aligned_buffer), aligned_len, intent);
     }
-
-#if SEASTAR_API_LEVEL < 7
-    /**
-     * Read the requested amount of bytes starting from the given offset.
-     *
-     * @param pos offset to begin reading from
-     * @param len number of bytes to read
-     * @param pc the IO priority class under which to queue this operation
-     * @param intent the IO intention confirmation (\ref seastar::io_intent)
-     *
-     * @return temporary buffer containing the requested data.
-     *         or exceptional future in case of I/O error
-     *
-     * This function doesn't require any alignment for both "pos" and "len"
-     *
-     * ATTN: The method is going to be deprecated
-     *
-     * @note size of the returned buffer may be smaller than "len" if EOF is
-     *       reached or in case of I/O error.
-     */
-    template <typename CharType>
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<temporary_buffer<CharType>> dma_read(uint64_t pos, size_t len, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_read_impl(pos, len, internal::maybe_priority_class_ref(pc), intent).then([] (temporary_buffer<uint8_t> t) {
-            return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
-        });
-    }
-#endif
 
     /**
      * Read the requested amount of bytes starting from the given offset.
@@ -372,7 +305,7 @@ public:
      */
     template <typename CharType>
     future<temporary_buffer<CharType>> dma_read(uint64_t pos, size_t len, io_intent* intent = nullptr) noexcept {
-        return dma_read_impl(pos, len, internal::maybe_priority_class_ref(), intent).then([] (temporary_buffer<uint8_t> t) {
+        return dma_read_impl(pos, len, intent).then([] (temporary_buffer<uint8_t> t) {
             return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
         });
     }
@@ -380,32 +313,6 @@ public:
     /// Error thrown when attempting to read past end-of-file
     /// with \ref dma_read_exactly().
     class eof_error : public std::exception {};
-
-#if SEASTAR_API_LEVEL < 7
-    /**
-     * Read the exact amount of bytes.
-     *
-     * @param pos offset in a file to begin reading from
-     * @param len number of bytes to read
-     * @param pc the IO priority class under which to queue this operation
-     * @param intent the IO intention confirmation (\ref seastar::io_intent)
-     *
-     * ATTN: The method is going to be deprecated
-     *
-     * @return temporary buffer containing the read data
-     *        or exceptional future in case an error, holding:
-     *        end_of_file_error if EOF is reached, file_io_error or
-     *        std::system_error in case of I/O error.
-     */
-    template <typename CharType>
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<temporary_buffer<CharType>>
-    dma_read_exactly(uint64_t pos, size_t len, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_read_exactly_impl(pos, len, internal::maybe_priority_class_ref(pc), intent).then([] (temporary_buffer<uint8_t> t) {
-            return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
-        });
-    }
-#endif
 
     /**
      * Read the exact amount of bytes.
@@ -422,30 +329,11 @@ public:
     template <typename CharType>
     future<temporary_buffer<CharType>>
     dma_read_exactly(uint64_t pos, size_t len, io_intent* intent = nullptr) noexcept {
-        return dma_read_exactly_impl(pos, len, internal::maybe_priority_class_ref(), intent).then([] (temporary_buffer<uint8_t> t) {
+        return dma_read_exactly_impl(pos, len, intent).then([] (temporary_buffer<uint8_t> t) {
             return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
         });
     }
 
-#if SEASTAR_API_LEVEL < 7
-    /// Performs a DMA read into the specified iovec.
-    ///
-    /// \param pos offset to read from.  Must be aligned to \ref disk_read_dma_alignment.
-    /// \param iov vector of address/size pairs to read into.  Addresses must be
-    ///            aligned.
-    /// \param pc the IO priority class under which to queue this operation
-    /// \param intent the IO intention confirmation (\ref seastar::io_intent)
-    ///
-    /// ATTN: The method is going to be deprecated
-    ///
-    /// \return a future representing the number of bytes actually read.  A short
-    ///         read may happen due to end-of-file or an I/O error.
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<size_t> dma_read(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_read_impl(pos, std::move(iov), internal::maybe_priority_class_ref(pc), intent);
-    }
-#endif
-
     /// Performs a DMA read into the specified iovec.
     ///
     /// \param pos offset to read from.  Must be aligned to \ref disk_read_dma_alignment.
@@ -455,30 +343,12 @@ public:
     ///
     /// \return a future representing the number of bytes actually read.  A short
     ///         read may happen due to end-of-file or an I/O error.
+    ///
+    /// Note that for this overload, \ref disk_read_max_length corresponds to the sum of
+    /// the iovec sizes.
     future<size_t> dma_read(uint64_t pos, std::vector<iovec> iov, io_intent* intent = nullptr) noexcept {
-        return dma_read_impl(pos, std::move(iov), internal::maybe_priority_class_ref(), intent);
+        return dma_read_impl(pos, std::move(iov), intent);
     }
-
-#if SEASTAR_API_LEVEL < 7
-    /// Performs a DMA write from the specified buffer.
-    ///
-    /// \param pos offset to write into.  Must be aligned to \ref disk_write_dma_alignment.
-    /// \param buffer aligned address of buffer to read from.  Buffer must exists
-    ///               until the future is made ready.
-    /// \param len number of bytes to write.  Must be aligned.
-    /// \param pc the IO priority class under which to queue this operation
-    /// \param intent the IO intention confirmation (\ref seastar::io_intent)
-    ///
-    /// ATTN: The method is going to be deprecated
-    ///
-    /// \return a future representing the number of bytes actually written.  A short
-    ///         write may happen due to an I/O error.
-    template <typename CharType>
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<size_t> dma_write(uint64_t pos, const CharType* buffer, size_t len, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_write_impl(pos, reinterpret_cast<const uint8_t*>(buffer), len, internal::maybe_priority_class_ref(pc), intent);
-    }
-#endif
 
     /// Performs a DMA write from the specified buffer.
     ///
@@ -492,27 +362,8 @@ public:
     ///         write may happen due to an I/O error.
     template <typename CharType>
     future<size_t> dma_write(uint64_t pos, const CharType* buffer, size_t len, io_intent* intent = nullptr) noexcept {
-        return dma_write_impl(pos, reinterpret_cast<const uint8_t*>(buffer), len, internal::maybe_priority_class_ref(), intent);
+        return dma_write_impl(pos, reinterpret_cast<const uint8_t*>(buffer), len, intent);
     }
-
-#if SEASTAR_API_LEVEL < 7
-    /// Performs a DMA write to the specified iovec.
-    ///
-    /// \param pos offset to write into.  Must be aligned to \ref disk_write_dma_alignment.
-    /// \param iov vector of address/size pairs to write from.  Addresses must be
-    ///            aligned.
-    /// \param pc the IO priority class under which to queue this operation
-    /// \param intent the IO intention confirmation (\ref seastar::io_intent)
-    ///
-    /// ATTN: The method is going to be deprecated
-    ///
-    /// \return a future representing the number of bytes actually written.  A short
-    ///         write may happen due to an I/O error.
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<size_t> dma_write(uint64_t pos, std::vector<iovec> iov, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_write_impl(pos, std::move(iov), internal::maybe_priority_class_ref(pc), intent);
-    }
-#endif
 
     /// Performs a DMA write to the specified iovec.
     ///
@@ -523,8 +374,11 @@ public:
     ///
     /// \return a future representing the number of bytes actually written.  A short
     ///         write may happen due to an I/O error.
+    ///
+    /// Note that for this overload, \ref disk_write_max_length corresponds to the sum of
+    /// the iovec sizes.
     future<size_t> dma_write(uint64_t pos, std::vector<iovec> iov, io_intent* intent = nullptr) noexcept {
-        return dma_write_impl(pos, std::move(iov), internal::maybe_priority_class_ref(), intent);
+        return dma_write_impl(pos, std::move(iov), intent);
     }
 
     /// Causes any previously written data to be made stable on persistent storage.
@@ -535,6 +389,12 @@ public:
 
     /// Returns \c stat information about the file.
     future<struct stat> stat() noexcept;
+
+    /// Returns \c stat information about a file in this directory.
+    ///
+    /// \param name the name of the file relative to this directory
+    /// \param flags optional flags (e.g., AT_SYMLINK_NOFOLLOW, see man fstatat)
+    future<struct stat> statat(std::string_view name, int flags = 0) noexcept;
 
     /// Truncates the file to a specified length.
     future<> truncate(uint64_t length) noexcept;
@@ -617,20 +477,6 @@ public:
     ///         if the operation has failed
     future<int> fcntl_short(int op, uintptr_t arg = 0UL) noexcept;
 
-    /// Set a lifetime hint for the open file descriptor corresponding to seastar::file
-    ///
-    /// Write lifetime  hints  can be used to inform the kernel about the relative
-    /// expected lifetime of writes on a given inode or via open file descriptor.
-    /// An application may use the different hint values to separate writes into different
-    /// write classes, so that multiple users or applications running on a single storage back-end
-    /// can aggregate their I/O  patterns in a consistent manner.
-    /// Refer fcntl(2) man page for more details on write lifetime hints.
-    ///
-    /// \param hint the hint value of the stream
-    /// \return future indicating success or failure
-    [[deprecated("This API was removed from the kernel")]]
-    future<> set_file_lifetime_hint(uint64_t hint) noexcept;
-
     /// Set a lifetime hint for the inode corresponding to seastar::file
     ///
     /// Write lifetime  hints  can be used to inform the kernel about the relative
@@ -643,20 +489,6 @@ public:
     /// \param hint the hint value of the stream
     /// \return future indicating success or failure
     future<> set_inode_lifetime_hint(uint64_t hint) noexcept;
-
-    /// Get the lifetime hint of the open file descriptor of seastar::file which was set by
-    /// \ref set_file_lifetime_hint()
-    ///
-    /// Write lifetime  hints  can be used to inform the kernel about the relative
-    /// expected lifetime of writes on a given inode or via open file descriptor.
-    /// An application may use the different hint values to separate writes into different
-    /// write classes, so that multiple users or applications running on a single storage back-end
-    /// can aggregate their I/O  patterns in a consistent manner.
-    /// Refer fcntl(2) man page for more details on write lifetime hints.
-    ///
-    /// \return the hint value of the open file descriptor
-    [[deprecated("This API was removed from the kernel")]]
-    future<uint64_t> get_file_lifetime_hint() noexcept;
 
     /// Get the lifetime hint of the inode of seastar::file which was set by
     /// \ref set_inode_lifetime_hint()
@@ -677,7 +509,8 @@ public:
     /// Closes the file.
     ///
     /// Flushes any pending operations and release any resources associated with
-    /// the file (except for stable storage).
+    /// the file (except for stable storage). Resets the file object back to
+    /// uninitialized state as if by assigning file() to it.
     ///
     /// \note
     /// \c close() never fails. It just reports errors and swallows them.
@@ -688,40 +521,8 @@ public:
     /// Returns a directory listing, given that this file object is a directory.
     subscription<directory_entry> list_directory(std::function<future<> (directory_entry de)> next);
 
-#ifdef SEASTAR_COROUTINES_ENABLED
     /// Returns a directory listing, given that this file object is a directory.
-    // due to https://github.com/scylladb/seastar/issues/1913, we cannot use
-    // buffered generator yet.
-    coroutine::experimental::generator<directory_entry> experimental_list_directory();
-#endif
-
-#if SEASTAR_API_LEVEL < 7
-    /**
-     * Read a data bulk containing the provided addresses range that starts at
-     * the given offset and ends at either the address aligned to
-     * dma_alignment (4KB) or at the file end.
-     *
-     * @param offset starting address of the range the read bulk should contain
-     * @param range_size size of the addresses range
-     * @param pc the IO priority class under which to queue this operation
-     * @param intent the IO intention confirmation (\ref seastar::io_intent)
-     *
-     * ATTN: The method is going to be deprecated
-     *
-     * @return temporary buffer containing the read data bulk.
-     *        or exceptional future holding:
-     *        system_error exception in case of I/O error or eof_error when
-     *        "offset" is beyond EOF.
-     */
-    template <typename CharType>
-    [[deprecated("Use scheduling_groups and API level >= 7")]]
-    future<temporary_buffer<CharType>>
-    dma_read_bulk(uint64_t offset, size_t range_size, const io_priority_class& pc, io_intent* intent = nullptr) noexcept {
-        return dma_read_bulk_impl(offset, range_size, internal::maybe_priority_class_ref(pc), intent).then([] (temporary_buffer<uint8_t> t) {
-            return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
-        });
-    }
-#endif
+    list_directory_generator_type experimental_list_directory();
 
     /**
      * Read a data bulk containing the provided addresses range that starts at
@@ -740,7 +541,7 @@ public:
     template <typename CharType>
     future<temporary_buffer<CharType>>
     dma_read_bulk(uint64_t offset, size_t range_size, io_intent* intent = nullptr) noexcept {
-        return dma_read_bulk_impl(offset, range_size, internal::maybe_priority_class_ref(), intent).then([] (temporary_buffer<uint8_t> t) {
+        return dma_read_bulk_impl(offset, range_size, intent).then([] (temporary_buffer<uint8_t> t) {
             return temporary_buffer<CharType>(reinterpret_cast<CharType*>(t.get_write()), t.size(), t.release());
         });
     }
@@ -756,30 +557,29 @@ public:
     file_handle dup();
 private:
     future<temporary_buffer<uint8_t>>
-    dma_read_bulk_impl(uint64_t offset, size_t range_size, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_read_bulk_impl(uint64_t offset, size_t range_size, io_intent* intent) noexcept;
 
     future<size_t>
-    dma_write_impl(uint64_t pos, const uint8_t* buffer, size_t len, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_write_impl(uint64_t pos, const uint8_t* buffer, size_t len, io_intent* intent) noexcept;
 
     future<size_t>
-    dma_write_impl(uint64_t pos, std::vector<iovec> iov, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_write_impl(uint64_t pos, std::vector<iovec> iov, io_intent* intent) noexcept;
 
     future<temporary_buffer<uint8_t>>
-    dma_read_impl(uint64_t pos, size_t len, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_read_impl(uint64_t pos, size_t len, io_intent* intent) noexcept;
 
     future<size_t>
-    dma_read_impl(uint64_t aligned_pos, uint8_t* aligned_buffer, size_t aligned_len, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_read_impl(uint64_t aligned_pos, uint8_t* aligned_buffer, size_t aligned_len, io_intent* intent) noexcept;
 
     future<size_t>
-    dma_read_impl(uint64_t pos, std::vector<iovec> iov, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_read_impl(uint64_t pos, std::vector<iovec> iov, io_intent* intent) noexcept;
 
     future<temporary_buffer<uint8_t>>
-    dma_read_exactly_impl(uint64_t pos, size_t len, internal::maybe_priority_class_ref pc, io_intent* intent) noexcept;
+    dma_read_exactly_impl(uint64_t pos, size_t len, io_intent* intent) noexcept;
 
     future<uint64_t> get_lifetime_hint_impl(int op) noexcept;
     future<> set_lifetime_hint_impl(int op, uint64_t hint) noexcept;
 
-    friend class reactor;
     friend class file_impl;
     friend class file_data_sink_impl;
     friend class file_data_source_impl;
@@ -792,10 +592,9 @@ private:
 /// \param file_fut A future that produces a file
 /// \param func A function that uses a file
 /// \returns the future returned by \c func, or an exceptional future if either \c file_fut or closing the file failed.
-template <typename Func>
-SEASTAR_CONCEPT( requires std::invocable<Func, file&> && std::is_nothrow_move_constructible_v<Func> )
+template <std::invocable<file&> Func>
+requires std::is_nothrow_move_constructible_v<Func>
 auto with_file(future<file> file_fut, Func func) noexcept {
-    static_assert(std::is_nothrow_move_constructible_v<Func>, "Func's move constructor must not throw");
     return file_fut.then([func = std::move(func)] (file f) mutable {
         return do_with(std::move(f), [func = std::move(func)] (file& f) mutable {
             return futurize_invoke(func, f).finally([&f] {
@@ -819,10 +618,9 @@ auto with_file(future<file> file_fut, Func func) noexcept {
 /// \param file_fut A future that produces a file
 /// \param func A function that uses a file
 /// \returns the future returned by \c func, or an exceptional future if \c file_fut failed or a nested exception if closing the file failed.
-template <typename Func>
-SEASTAR_CONCEPT( requires std::invocable<Func, file&> && std::is_nothrow_move_constructible_v<Func> )
+template <std::invocable<file&> Func>
+requires std::is_nothrow_move_constructible_v<Func>
 auto with_file_close_on_failure(future<file> file_fut, Func func) noexcept {
-    static_assert(std::is_nothrow_move_constructible_v<Func>, "Func's move constructor must not throw");
     return file_fut.then([func = std::move(func)] (file f) mutable {
         return do_with(std::move(f), [func = std::move(func)] (file& f) mutable {
             return futurize_invoke(std::move(func), f).then_wrapped([&f] (auto ret) mutable {
@@ -880,6 +678,5 @@ public:
     }
 };
 
-SEASTAR_MODULE_EXPORT_END
 
 }

@@ -17,7 +17,7 @@
  */
 /*
  * Copyright (C) 2019 Red Hat, Inc.
- */ 
+ */
 
 #include <filesystem>
 
@@ -88,7 +88,7 @@ future<> ud_server_client::init_server() {
                     }
                 }
                 client_round();
-            } 
+            }
         });
 
         return do_until([this](){return rounds_left<=0;}, [&lstn,this]() {
@@ -131,16 +131,16 @@ future<> ud_server_client::init_server() {
 /// If 'client_path' is set, the client binds to the named path.
 // Runs in a seastar::thread.
 void ud_server_client::client_round() {
-    auto cc = client_path ? 
-        engine().net().connect(server_addr, socket_address{unix_domain_addr{*client_path}}).get0() :
-        engine().net().connect(server_addr).get0();
+    auto cc = client_path ?
+        engine().net().connect(server_addr, socket_address{unix_domain_addr{*client_path}}).get() :
+        engine().net().connect(server_addr).get();
 
     auto inp = cc.input();
     auto out = cc.output();
 
     out.write(test_message).get();
     out.flush().get();
-    auto bb = inp.read().get0();
+    auto bb = inp.read().get();
     BOOST_REQUIRE_EQUAL(std::string_view(bb.begin(), bb.size()), "+"s+test_message);
     inp.close().get();
     out.close().get();
@@ -154,11 +154,16 @@ future<> ud_server_client::run() {
 
 }
 
+void rm(std::string_view what) {
+    auto res = system(fmt::format("rm -f {}", what).c_str());
+    BOOST_REQUIRE_EQUAL(res, 0);
+}
+
 //  testing the various address types, both on the server and on the
 //  client side
 
 SEASTAR_TEST_CASE(unixdomain_server) {
-    system("rm -f /tmp/ry");
+    rm("/tmp/ry");
     ud_server_client uds("/tmp/ry", std::nullopt, 3);
     return do_with(std::move(uds), [](auto& uds){
         return uds.run();
@@ -205,7 +210,7 @@ SEASTAR_TEST_CASE(unixdomain_text) {
 }
 
 SEASTAR_TEST_CASE(unixdomain_bind) {
-    system("rm -f 111 112");
+    rm("111 112");
     ud_server_client uds("111"s, "112"s, 1);
     return do_with(std::move(uds), [](auto& uds){
         return uds.run();
@@ -213,7 +218,7 @@ SEASTAR_TEST_CASE(unixdomain_bind) {
 }
 
 SEASTAR_TEST_CASE(unixdomain_short) {
-    system("rm -f 3");
+    rm("3");
     ud_server_client uds("3"s, std::nullopt, 10);
     return do_with(std::move(uds), [](auto& uds){
         return uds.run();
@@ -246,20 +251,17 @@ static socket_address autobind() {
     return addr;
 }
 
-static string to_string(net::packet p) {
-    p.linearize();
-    const auto& f = p.frag(0);
-    return std::string(f.base, f.size);
-}
-
 SEASTAR_THREAD_TEST_CASE(unixdomain_datagram_autobind) {
     auto chan1 = make_unbound_datagram_channel(AF_UNIX);
     auto chan2 = make_bound_datagram_channel(autobind());
 
     chan1.send(chan2.local_address(), "hello").get();
-    net::datagram dgram = chan2.receive().get0();
+    net::datagram dgram = chan2.receive().get();
 
-    string received = to_string(std::move(dgram.get_data()));
+    auto bufs = dgram.get_buffers();
+    // POSIX impementation uses single buffer
+    BOOST_REQUIRE_EQUAL(bufs.size(), 1);
+    string received = internal::to_sstring<sstring>(bufs[0]);
     BOOST_REQUIRE_EQUAL(received, "hello");
 }
 
@@ -281,8 +283,11 @@ SEASTAR_THREAD_TEST_CASE(unixdomain_datagram_named_bound) {
     auto sender = make_unbound_datagram_channel(AF_UNIX);
     sender.send(socket_address{unix_domain_addr{socket_path}}, "hihi").get();
 
-    net::udp_datagram dgram = named_receiver.receive().get0();
-    string received = to_string(std::move(dgram.get_data()));
+    net::udp_datagram dgram = named_receiver.receive().get();
+    auto bufs = dgram.get_buffers();
+    // POSIX impementation uses single buffer
+    BOOST_REQUIRE_EQUAL(bufs.size(), 1);
+    string received = internal::to_sstring<sstring>(bufs[0]);
     BOOST_REQUIRE_EQUAL(received, "hihi");
 
     // Try to be nice and remove the temporary directory.

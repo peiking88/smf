@@ -23,25 +23,20 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/core/posix.hh>
-#include <seastar/core/internal/io_desc.hh>
 #include <seastar/util/bool_class.hh>
-#include <seastar/util/modules.hh>
-#ifndef SEASTAR_MODULE
 #include <boost/intrusive_ptr.hpp>
 #include <cstdint>
+#include <span>
 #include <vector>
 #include <tuple>
 #include <sys/uio.h>
-#endif
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 class reactor;
 class pollable_fd;
 class pollable_fd_state;
 class socket_address;
-SEASTAR_MODULE_EXPORT_END
 
 namespace internal {
 
@@ -51,7 +46,6 @@ class buffer_allocator;
 
 namespace net {
 
-SEASTAR_MODULE_EXPORT
 class packet;
 
 }
@@ -63,7 +57,6 @@ using pollable_fd_state_ptr = boost::intrusive_ptr<pollable_fd_state>;
 class pollable_fd_state {
     unsigned _refs = 0;
 public:
-    virtual ~pollable_fd_state() {}
     struct speculation {
         int events = 0;
         explicit speculation(int epoll_events_guessed = 0) : events(epoll_events_guessed) {}
@@ -105,10 +98,15 @@ public:
     future<size_t> read_some(uint8_t* buffer, size_t size);
     future<size_t> read_some(const std::vector<iovec>& iov);
     future<temporary_buffer<char>> read_some(internal::buffer_allocator* ba);
-    future<> write_all(const char* buffer, size_t size);
-    future<> write_all(const uint8_t* buffer, size_t size);
+#if SEASTAR_API_LEVEL >= 9
+    future<size_t> write_some(std::span<iovec> iovs);
+    future<> write_all(std::span<iovec> iovs);
+#else
     future<size_t> write_some(net::packet& p);
     future<> write_all(net::packet& p);
+    future<> write_all(const char* buffer, size_t size);
+    future<> write_all(const uint8_t* buffer, size_t size);
+#endif
     future<> readable();
     future<> writeable();
     future<> readable_or_writeable();
@@ -119,10 +117,12 @@ public:
     future<size_t> recvmsg(struct msghdr *msg);
     future<size_t> sendto(socket_address addr, const void* buf, size_t len);
     future<> poll_rdhup();
+    void shutdown(int how);
 
 protected:
     explicit pollable_fd_state(file_desc fd, speculation speculate = speculation())
         : fd(std::move(fd)), events_known(speculate.events) {}
+    ~pollable_fd_state() = default;
 private:
     void maybe_no_more_recv();
     void maybe_no_more_send();
@@ -152,18 +152,27 @@ public:
     future<temporary_buffer<char>> read_some(internal::buffer_allocator* ba) {
         return _s->read_some(ba);
     }
-    future<> write_all(const char* buffer, size_t size) {
-        return _s->write_all(buffer, size);
+#if SEASTAR_API_LEVEL >= 9
+    future<size_t> write_some(std::span<iovec> iov) {
+        return _s->write_some(iov);
     }
-    future<> write_all(const uint8_t* buffer, size_t size) {
-        return _s->write_all(buffer, size);
+    future<> write_all(std::span<iovec> iov) {
+        return _s->write_all(iov);
     }
+#else
     future<size_t> write_some(net::packet& p) {
         return _s->write_some(p);
     }
     future<> write_all(net::packet& p) {
         return _s->write_all(p);
     }
+    future<> write_all(const char* buffer, size_t size) {
+        return _s->write_all(buffer, size);
+    }
+    future<> write_all(const uint8_t* buffer, size_t size) {
+        return _s->write_all(buffer, size);
+    }
+#endif
     future<> readable() {
         return _s->readable();
     }
@@ -201,14 +210,12 @@ public:
     future<> poll_rdhup() {
         return _s->poll_rdhup();
     }
-protected:
     int get_fd() const { return _s->fd.get(); }
+
+protected:
     void maybe_no_more_recv() { return _s->maybe_no_more_recv(); }
     void maybe_no_more_send() { return _s->maybe_no_more_send(); }
-    friend class reactor;
-    friend class readable_eventfd;
-    friend class writeable_eventfd;
-    friend class aio_storage_context;
+
 private:
     pollable_fd_state_ptr _s;
 };

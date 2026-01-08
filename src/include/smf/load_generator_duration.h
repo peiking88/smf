@@ -6,6 +6,8 @@
 #include <iostream>
 #include <sstream>
 
+#include <fmt/format.h>
+
 #include "smf/histogram.h"
 #include "smf/human_bytes.h"
 
@@ -64,3 +66,15 @@ operator<<(std::ostream &o, const smf::load_generator_duration &d) {
 }
 
 }  // namespace smf
+
+template <>
+struct fmt::formatter<smf::load_generator_duration> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  
+  template <typename FormatContext>
+  auto format(const smf::load_generator_duration& d, FormatContext& ctx) const {
+    return fmt::format_to(ctx.out(),
+      "generator_duration={{ test_duration={}ms, qps={}, total_bytes={}({}) }}",
+      d.duration_in_millis(), d.qps(), smf::human_bytes(d.total_bytes), d.total_bytes);
+  }
+};

@@ -119,7 +119,7 @@ rpc_client::raw_send(rpc_envelope e) {
                          rpc::compression_flags::compression_flags_none,
                        "client is communicating with a server speaking "
                        "different compression protocols: {}",
-                       ctx.header.compression());
+                       static_cast<int>(ctx.header.compression()));
           return seastar::make_ready_future<opt_recv_t>(
             opt_recv_t(std::move(ctx)));
         });

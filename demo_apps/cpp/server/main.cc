@@ -81,7 +81,7 @@ main(int args, char **argv, char **env) {
         builder.set_dh_level(seastar::tls::dh_params::level::MEDIUM);
         builder.set_x509_key_file(cert, key, seastar::tls::x509_crt_format::PEM)
           .get();
-        args.credentials = builder.build_reloadable_server_credentials().get0();
+        args.credentials = builder.build_reloadable_server_credentials().get();
       }
 
       rpc.start(args).get();

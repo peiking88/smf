@@ -25,6 +25,7 @@
  */
 
 #include <seastar/testing/linux_perf_event.hh>
+#include <seastar/util/assert.hh>
 
 #include <linux/perf_event.h>
 #include <linux/hw_breakpoint.h>
@@ -61,7 +62,8 @@ linux_perf_event::read() {
         return 0;
     }
     uint64_t ret;
-    ::read(_fd, &ret, sizeof(ret));
+    auto res = ::read(_fd, &ret, sizeof(ret));
+    SEASTAR_ASSERT(res == sizeof(ret) && "read(2) failed on perf_event fd");
     return ret;
 }
 
@@ -81,14 +83,29 @@ linux_perf_event::disable() {
     ::ioctl(_fd, PERF_EVENT_IOC_DISABLE, 0);
 }
 
-linux_perf_event
-linux_perf_event::user_instructions_retired() {
+static linux_perf_event
+make_linux_perf_event(unsigned config, pid_t pid = 0, int cpu = -1, int group_fd = -1, unsigned long flags = 0) {
     return linux_perf_event(perf_event_attr{
             .type = PERF_TYPE_HARDWARE,
             .size = sizeof(struct perf_event_attr),
-            .config = PERF_COUNT_HW_INSTRUCTIONS,
+            .config = config,
             .disabled = 1,
             .exclude_kernel = 1,
             .exclude_hv = 1,
-            }, 0, -1, -1, 0);
+#if defined(__x86_64__)
+            // exclude_idle is not supported on all architectures (e.g. aarch64)
+            // so enable it selectively only on architectures that support it.
+            .exclude_idle = 1,
+#endif
+            }, pid, cpu, group_fd, flags);
+}
+
+linux_perf_event
+linux_perf_event::user_instructions_retired() {
+    return make_linux_perf_event(PERF_COUNT_HW_INSTRUCTIONS);
+}
+
+linux_perf_event
+linux_perf_event::user_cpu_cycles_retired() {
+    return make_linux_perf_event(PERF_COUNT_HW_CPU_CYCLES);
 }

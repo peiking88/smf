@@ -24,11 +24,9 @@
 #include <memory>
 #include <functional>
 #include <atomic>
-#include <random>
 #include <seastar/core/future.hh>
 #include <seastar/core/posix.hh>
 #include <seastar/testing/exchanger.hh>
-#include <seastar/testing/random.hh>
 
 namespace seastar {
 
@@ -48,7 +46,7 @@ private:
         start_thread_args(int ac_, char** av_) noexcept : ac(ac_), av(av_) {}
     };
     std::unique_ptr<start_thread_args> _st_args;
-    int start_thread(int ac, char** av);
+    bool start_thread(int ac, char** av);
 public:
     // Returns whether initialization was successful.
     // Will return as soon as the seastar::app was started.

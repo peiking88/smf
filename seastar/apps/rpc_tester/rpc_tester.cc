@@ -19,12 +19,13 @@
  * Copyright (C) 2022 ScyllaDB
  */
 
+#include <iostream>
 #include <vector>
 #include <chrono>
 #include <random>
+#include <ranges>
 #include <yaml-cpp/yaml.h>
 #include <fmt/core.h>
-#include <boost/range/irange.hpp>
 #pragma GCC diagnostic push
 // see https://github.com/boostorg/accumulators/pull/54
 #pragma GCC diagnostic ignored "-Wuninitialized"
@@ -42,6 +43,7 @@
 #include <seastar/core/with_scheduling_group.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/rpc/rpc.hh>
+#include <seastar/util/assert.hh>
 
 using namespace seastar;
 using namespace boost::accumulators;
@@ -387,7 +389,7 @@ class job_rpc : public job {
 
     future<> call_write(unsigned dummy, const payload_t& pl) {
         return _rpc.make_client<uint64_t(payload_t)>(rpc_verb::WRITE)(*_client, pl).then([exp = pl.size()] (auto res) {
-            assert(res == exp);
+            SEASTAR_ASSERT(res == exp);
             return make_ready_future<>();
         });
     }
@@ -429,7 +431,7 @@ public:
         co.tcp_nodelay = _ccfg.nodelay;
         co.isolation_cookie = _cfg.sg_name;
         _client = std::make_unique<rpc_protocol::client>(_rpc, co, _caddr);
-        return parallel_for_each(boost::irange(0u, _cfg.parallelism), [this] (auto dummy) {
+        return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this] (auto dummy) {
           auto f = make_ready_future<>();
           if (_cfg.sleep_time) {
               // Do initial small delay to de-synchronize fibers
@@ -513,7 +515,7 @@ public:
     virtual future<> run() override {
         _stop = std::chrono::steady_clock::now() + _cfg.duration;
         return with_scheduling_group(_cfg.sg, [this] {
-          return parallel_for_each(boost::irange(0u, _cfg.parallelism), [this] (auto dummy) {
+          return parallel_for_each(std::views::iota(0u, _cfg.parallelism), [this] (auto dummy) {
             return do_until([this] {
                 return std::chrono::steady_clock::now() > _stop;
             }, [this] {
@@ -714,7 +716,7 @@ int main(int ac, char** av) {
                 jc.duration = duration;
                 if (groups.count(jc.sg_name) == 0) {
                     fmt::print("Make sched group {}, {} shares\n", jc.sg_name, jc.shares);
-                    groups[jc.sg_name] = create_scheduling_group(jc.sg_name, jc.shares).get0();
+                    groups[jc.sg_name] = create_scheduling_group(jc.sg_name, jc.shares).get();
                 }
                 jc.sg = groups[jc.sg_name];
             }

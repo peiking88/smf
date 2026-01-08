@@ -20,22 +20,20 @@
  */
 #pragma once
 
-#ifndef SEASTAR_MODULE
 #include <boost/program_options.hpp>
 #include <functional>
 #include <chrono>
-#endif
 #include <seastar/core/future.hh>
-#include <seastar/core/smp.hh>
 #include <seastar/core/smp_options.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/util/program-options.hh>
 #include <seastar/core/metrics_api.hh>
 #include <seastar/core/scollectd.hh>
 #include <seastar/util/log-cli.hh>
-#include <seastar/util/modules.hh>
 
 namespace seastar {
+
+class smp;
 
 namespace alien {
 
@@ -43,7 +41,6 @@ class instance;
 
 }
 
-SEASTAR_MODULE_EXPORT
 class app_template {
 public:
     struct config {
@@ -68,7 +65,7 @@ public:
         /// When false, Seastar will not set up signal handlers for SIGINT/SIGTERM
         /// automatically. The default behavior (terminate the program) will be kept.
         /// You can adjust the behavior of SIGINT/SIGTERM by installing signal handlers
-        /// via reactor::handle_signal().
+        /// via seastar::handle_signal(signo, handler, once); instead.
         bool auto_handle_sigint_sigterm = true;
         /// Specifies the default value for linux-aio I/O control blocks. This translates
         /// to the maximum number of sockets the shard can handle.
@@ -104,7 +101,7 @@ public:
         /// When false, Seastar will not set up signal handlers for SIGINT/SIGTERM
         /// automatically. The default behavior (terminate the program) will be kept.
         /// You can adjust the behavior of SIGINT/SIGTERM by installing signal handlers
-        /// via reactor::handle_signal().
+        /// via seastar::handle_signal(signo, handler, once); instead.
         bool auto_handle_sigint_sigterm = true;
         /// Configuration options for the reactor.
         reactor_options reactor_opts;

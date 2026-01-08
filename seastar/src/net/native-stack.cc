@@ -23,7 +23,6 @@
 module;
 #endif
 
-#include <cassert>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -32,15 +31,12 @@ module;
 #include <optional>
 #include <queue>
 
+#include <seastar/util/assert.hh>
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-
-#ifdef HAVE_OSV
-#include <osv/firmware.hh>
-#include <gnu/libc-version.h>
-#endif
 
 #ifdef SEASTAR_MODULE
 module seastar;
@@ -90,8 +86,8 @@ void create_native_net_device(const native_stack_options& opts) {
              dev = create_dpdk_net_device(opts.dpdk_opts.dpdk_port_index.get_value(), smp::count,
                 !(opts.lro && opts.lro.get_value() == "off"),
                 !(opts.dpdk_opts.hw_fc && opts.dpdk_opts.hw_fc.get_value() == "off"));
-       } else 
-#endif  
+       } else
+#endif
         dev = create_virtio_net_device(opts.virtio_opts, opts.lro);
     }
     else {
@@ -102,15 +98,15 @@ void create_native_net_device(const native_stack_options& opts) {
         }
 
         for ( auto&& device_config : device_configs) {
-            auto& hw_config = device_config.second.hw_cfg;   
+            auto& hw_config = device_config.second.hw_cfg;
 #ifdef SEASTAR_HAVE_DPDK
             if ( hw_config.port_index || !hw_config.pci_address.empty() ) {
 	            dev = create_dpdk_net_device(hw_config);
-	        } else 
-#endif  
+	        } else
+#endif
             {
-                (void)hw_config;        
-                std::runtime_error("only DPDK supports new configuration format"); 
+                (void)hw_config;
+                std::runtime_error("only DPDK supports new configuration format");
             }
         }
     }
@@ -183,7 +179,7 @@ public:
     virtual future<> initialize() override;
     static future<std::unique_ptr<network_stack>> create(const program_options::option_group& opts) {
         auto ns_opts = dynamic_cast<const native_stack_options*>(&opts);
-        assert(ns_opts);
+        SEASTAR_ASSERT(ns_opts);
         if (this_shard_id() == 0) {
             create_native_net_device(*ns_opts);
         }
@@ -199,6 +195,18 @@ public:
     friend class native_network_interface;
 
     std::vector<network_interface> network_interfaces() override;
+
+    virtual statistics stats(unsigned scheduling_group_id) override {
+        return statistics{
+            internal::native_stack_net_stats::bytes_sent[scheduling_group_id],
+            internal::native_stack_net_stats::bytes_received[scheduling_group_id],
+        };
+    }
+
+    virtual void clear_stats(unsigned scheduling_group_id) override {
+        internal::native_stack_net_stats::bytes_sent[scheduling_group_id] = 0;
+        internal::native_stack_net_stats::bytes_received[scheduling_group_id] = 0;
+    }
 };
 
 thread_local promise<std::unique_ptr<network_stack>> native_network_stack::ready_promise;
@@ -236,7 +244,7 @@ native_network_stack::native_network_stack(const native_stack_options& opts, std
 
 server_socket
 native_network_stack::listen(socket_address sa, listen_options opts) {
-    assert(sa.family() == AF_INET || sa.is_unspecified());
+    SEASTAR_ASSERT(sa.family() == AF_INET || sa.is_unspecified());
     return tcpv4_listen(_inet.get_tcp(), ntohs(sa.as_posix_sockaddr_in().sin_port), opts);
 }
 
@@ -401,13 +409,13 @@ public:
         return name();
     }
     const std::vector<net::inet_address>& addresses() const override {
-        return _addresses;            
+        return _addresses;
     }
     const std::vector<uint8_t> hardware_address() const override {
         return _hardware_address;
     }
     bool is_loopback() const override {
-        return false;   
+        return false;
     }
     bool is_virtual() const override {
         return false;
@@ -432,6 +440,6 @@ std::vector<network_interface> native_network_stack::network_interfaces() {
     return res;
 }
 
-}
+} // namespace net
 
 }

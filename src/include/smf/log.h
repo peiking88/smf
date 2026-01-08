@@ -1,241 +1,260 @@
 // Copyright (c) 2016 Alexander Gallego. All rights reserved.
 //
+
 #pragma once
 #ifndef SMF_PLATFORM_LOG_H
 #define SMF_PLATFORM_LOG_H
 
-#include <fmt/printf.h>
+#include <fmt/format.h>
 #include <seastar/util/log.hh>
+#include <source_location>
+#include <stdexcept>
+#include <string>
 
 #include "smf/macros.h"
 
 namespace smf {
+
 struct internal_logger {
-  static seastar::logger &
-  get() {
+  static seastar::logger &get() {
     static seastar::logger l("smf");
     return l;
   }
 };
 
 namespace log_detail {
-/// \brief compile time log helper to print log file name.
-/// @sz must be inclusive
-static constexpr const char *
-find_last_slash(const char *file, std::size_t sz, char x) {
-  return sz == 0
-           ? file
-           : file[sz] == x ? &file[sz + 1] : find_last_slash(file, sz - 1, x);
+
+// Helper to extract filename from path
+inline std::string_view extract_filename(const char* path) {
+  std::string_view sv(path);
+  auto pos = sv.rfind('/');
+  if (pos != std::string_view::npos) {
+    return sv.substr(pos + 1);
+  }
+  return sv;
 }
 
 // A small helper for throw_if_null().
 template <typename T>
-T *
-throw_if_null(const char *file, int line, const char *names, T *t) {
-  if (SMF_UNLIKELY(t == NULL)) {
-    auto s = fmt::sprintf("{}:{}] check_not_null({})", file, line, names);
-    smf::internal_logger::get().error(s.c_str());
-    throw std::runtime_error(s.c_str());
+T* throw_if_null(const char *file, int line, const char *names, T *t) {
+  if (SMF_UNLIKELY(t == nullptr)) {
+    auto s = fmt::format("{}:{} check_not_null({})", extract_filename(file), line, names);
+    smf::internal_logger::get().error("{}", s);
+    throw std::runtime_error(s);
   }
   return t;
 }
 
 template <typename... Args>
-inline void
-noop(Args &&... args) {
-  ((void)0);
+inline void noop(Args &&...) {}
+
+// Log functions with source location
+template <typename... Args>
+inline void log_info(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().info("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
 }
+
+template <typename... Args>
+inline void log_error(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().error("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void log_warn(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().warn("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void log_debug(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().debug("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void log_trace(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  if (SMF_UNLIKELY(smf::internal_logger::get().is_enabled(seastar::log_level::trace))) {
+    auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+    smf::internal_logger::get().trace("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+  }
+}
+
+template <typename... Args>
+[[noreturn]] inline void log_throw(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  auto full_msg = fmt::format("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+  smf::internal_logger::get().error("{}", full_msg);
+  throw std::runtime_error(full_msg);
+}
+
+template <typename... Args>
+inline void log_throw_if(bool condition, std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  if (SMF_UNLIKELY(condition)) {
+    auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+    auto full_msg = fmt::format("{}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+    smf::internal_logger::get().error("{}", full_msg);
+    throw std::runtime_error(full_msg);
+  }
+}
+
+// Debug versions
+template <typename... Args>
+inline void dlog_info(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().info("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void dlog_error(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().error("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void dlog_warn(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().warn("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void dlog_debug(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  smf::internal_logger::get().debug("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+}
+
+template <typename... Args>
+inline void dlog_trace(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  if (SMF_UNLIKELY(smf::internal_logger::get().is_enabled(seastar::log_level::trace))) {
+    auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+    smf::internal_logger::get().trace("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+  }
+}
+
+template <typename... Args>
+[[noreturn]] inline void dlog_throw(std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+  auto full_msg = fmt::format("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+  smf::internal_logger::get().error("{}", full_msg);
+  throw std::runtime_error(full_msg);
+}
+
+template <typename... Args>
+inline void dlog_throw_if(bool condition, std::source_location loc, fmt::format_string<Args...> fmt, Args&&... args) {
+  if (SMF_UNLIKELY(condition)) {
+    auto msg = fmt::format(fmt, std::forward<Args>(args)...);
+    auto full_msg = fmt::format("D {}:{} {}", extract_filename(loc.file_name()), loc.line(), msg);
+    smf::internal_logger::get().error("{}", full_msg);
+    throw std::runtime_error(full_msg);
+  }
+}
+
 }  // namespace log_detail
 
 /// brief Reliably takes effect inside a seastar app_
-///  seastar::app_template::run(argc, argv, []() {
-///    smf::app_run_log_level(seastar::log_level::trace);
-///  });
-inline static void
-app_run_log_level(seastar::log_level l) {
+inline void app_run_log_level(seastar::log_level l) {
   smf::internal_logger::get().set_level(l);
   seastar::global_logger_registry().set_logger_level("smf", l);
 }
+
 }  // namespace smf
 
-#define __FILENAME__                                                           \
-  smf::log_detail::find_last_slash(__FILE__, SMF_ARRAYSIZE(__FILE__) - 1, '/')
-#define LOG_INFO(format, args...)                                              \
-  smf::internal_logger::get().info("{}:{}] " format, __FILENAME__, __LINE__,   \
-                                   ##args)
-#define LOG_ERROR(format, args...)                                             \
-  smf::internal_logger::get().error("{}:{}] " format, __FILENAME__, __LINE__,  \
-                                    ##args)
-#define LOG_WARN(format, args...)                                              \
-  smf::internal_logger::get().warn("{}:{}] " format, __FILENAME__, __LINE__,   \
-                                   ##args)
-#define LOG_DEBUG(format, args...)                                             \
-  smf::internal_logger::get().debug("{}:{}] " format, __FILENAME__, __LINE__,  \
-                                    ##args)
-#define LOG_TRACE(format, args...)                                             \
-  do {                                                                         \
-    if (SMF_UNLIKELY(smf::internal_logger::get().is_enabled(                   \
-          seastar::log_level::trace))) {                                       \
-      smf::internal_logger::get().trace("{}:{}] " format, __FILENAME__,        \
-                                        __LINE__, ##args);                     \
-    }                                                                          \
-  } while (false)
+// Macro wrappers that capture source location
+#define LOG_INFO(...) \
+  smf::log_detail::log_info(std::source_location::current(), __VA_ARGS__)
 
-#define LOG_THROW(format, args...)                                             \
-  do {                                                                         \
-    smf::internal_logger::get().error("{}:{}] " format, __FILENAME__, __LINE__, \
-                   ##args);                                                    \
-    auto __smflog_s = fmt::sprintf("{}:{}] " format, __FILENAME__, __LINE__,  \
-                   ##args);                                                    \
-    throw std::runtime_error(__smflog_s.c_str());                              \
-  } while (false)
+#define LOG_ERROR(...) \
+  smf::log_detail::log_error(std::source_location::current(), __VA_ARGS__)
 
-#define THROW_IFNULL(val)                                                      \
-  smf::log_detail::throw_if_null(__FILE__, __LINE__,                           \
-                                 "'" #val "' Must be non NULL", (val))
-#define LOG_INFO_IF(condition, format, args...)                                \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().info("{}:{}] (" #condition ") " format,      \
-                                       __FILENAME__, __LINE__, ##args);        \
-    }                                                                          \
-  } while (false)
-#define LOG_ERROR_IF(condition, format, args...)                               \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().error("{}:{}] (" #condition ") " format,     \
-                                        __FILENAME__, __LINE__, ##args);       \
-    }                                                                          \
-  } while (false)
-#define LOG_DEBUG_IF(condition, format, args...)                               \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().debug("{}:{}] (" #condition ") " format,     \
-                                        __FILENAME__, __LINE__, ##args);       \
-    }                                                                          \
-  } while (false)
-#define LOG_WARN_IF(condition, format, args...)                                \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().warn("{}:{}] (" #condition ") " format,      \
-                                       __FILENAME__, __LINE__, ##args);        \
-    }                                                                          \
-  } while (false)
-#define LOG_TRACE_IF(condition, format, args...)                               \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().trace("{}:{}] (" #condition ") " format,     \
-                                        __FILENAME__, __LINE__, ##args);       \
-    }                                                                          \
-  } while (false)
-#define LOG_THROW_IF(condition, format, args...)                               \
-  do {                                                                         \
-    if (SMF_UNLIKELY(condition)) {                                             \
-      smf::internal_logger::get().error("{}:{}] (" #condition ") " format,     \
-                     __FILENAME__, __LINE__, ##args);                          \
-      auto __smflog_s = fmt::sprintf("{}:{}] (" #condition ") " format,      \
-                     __FILENAME__, __LINE__, ##args);                          \
-      throw std::runtime_error(__smflog_s.c_str());                            \
-    }                                                                          \
-  } while (false)
+#define LOG_WARN(...) \
+  smf::log_detail::log_warn(std::source_location::current(), __VA_ARGS__)
+
+#define LOG_DEBUG(...) \
+  smf::log_detail::log_debug(std::source_location::current(), __VA_ARGS__)
+
+#define LOG_TRACE(...) \
+  smf::log_detail::log_trace(std::source_location::current(), __VA_ARGS__)
+
+#define LOG_THROW(...) \
+  smf::log_detail::log_throw(std::source_location::current(), __VA_ARGS__)
+
+#define LOG_THROW_IF(condition, ...) \
+  smf::log_detail::log_throw_if((condition), std::source_location::current(), __VA_ARGS__)
+
+#define THROW_IFNULL(val) \
+  smf::log_detail::throw_if_null(__FILE__, __LINE__, "'" #val "' Must be non NULL", (val))
+
+#define LOG_INFO_IF(condition, ...) \
+  do { if (condition) { LOG_INFO(__VA_ARGS__); } } while (false)
+
+#define LOG_ERROR_IF(condition, ...) \
+  do { if (condition) { LOG_ERROR(__VA_ARGS__); } } while (false)
+
+#define LOG_DEBUG_IF(condition, ...) \
+  do { if (condition) { LOG_DEBUG(__VA_ARGS__); } } while (false)
+
+#define LOG_WARN_IF(condition, ...) \
+  do { if (condition) { LOG_WARN(__VA_ARGS__); } } while (false)
+
+#define LOG_TRACE_IF(condition, ...) \
+  do { if (condition) { LOG_TRACE(__VA_ARGS__); } } while (false)
 
 #ifndef NDEBUG
 
-#define DTHROW_IFNULL(val)                                                     \
-  smf::log_detail::throw_if_null(__FILE__, __LINE__,                           \
-                                 "D '" #val "' Must be non NULL", (val))
-#define DLOG_THROW(format, args...)                                            \
-  do {                                                                         \
-    smf::internal_logger::get().error("D {}:{}] " format, __FILENAME__, __LINE__, \
-                   ##args);                                                    \
-    auto __smflog_s = fmt::sprintf("D {}:{}] " format, __FILENAME__, __LINE__, \
-                   ##args);                                                    \
-    throw std::runtime_error(__smflog_s.c_str());                              \
-  } while (false)
+#define DTHROW_IFNULL(val) \
+  smf::log_detail::throw_if_null(__FILE__, __LINE__, "D '" #val "' Must be non NULL", (val))
 
-#define DLOG_INFO(format, args...)                                             \
-  smf::internal_logger::get().info("D {}:{}] " format, __FILENAME__, __LINE__, \
-                                   ##args)
-#define DLOG_ERROR(format, args...)                                            \
-  smf::internal_logger::get().error("D {}:{}] " format, __FILENAME__,          \
-                                    __LINE__, ##args)
-#define DLOG_WARN(format, args...)                                             \
-  smf::internal_logger::get().warn("D {}:{}] " format, __FILENAME__, __LINE__, \
-                                   ##args)
-#define DLOG_DEBUG(format, args...)                                            \
-  smf::internal_logger::get().debug("D {}:{}] " format, __FILENAME__,          \
-                                    __LINE__, ##args)
-#define DLOG_TRACE(format, args...)                                            \
-  do {                                                                         \
-    if (SMF_UNLIKELY(smf::internal_logger::get().is_enabled(                   \
-          seastar::log_level::trace))) {                                       \
-      smf::internal_logger::get().trace("D {}:{}] " format, __FILENAME__,      \
-                                        __LINE__, ##args);                     \
-    }                                                                          \
-  } while (false)
+#define DLOG_THROW(...) \
+  smf::log_detail::dlog_throw(std::source_location::current(), __VA_ARGS__)
 
-#define DLOG_INFO_IF(condition, format, args...)                               \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().info("D {}:{}] (" #condition ") " format,    \
-                                       __FILENAME__, __LINE__, ##args);        \
-    }                                                                          \
-  } while (false)
-#define DLOG_ERROR_IF(condition, format, args...)                              \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().error("D {}:{}] (" #condition ") " format,   \
-                                        __FILENAME__, __LINE__, ##args);       \
-    }                                                                          \
-  } while (false)
-#define DLOG_DEBUG_IF(condition, format, args...)                              \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().debug("D {}:{}] (" #condition ") " format,   \
-                                        __FILENAME__, __LINE__, ##args);       \
-    }                                                                          \
-  } while (false)
+#define DLOG_INFO(...) \
+  smf::log_detail::dlog_info(std::source_location::current(), __VA_ARGS__)
 
-#define DLOG_WARN_IF(condition, format, args...)                               \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().warn("D {}:{}] (" #condition ") " format,    \
-                                       __FILENAME__, __LINE__, ##args);        \
-    }                                                                          \
-  } while (false)
-#define DLOG_TRACE_IF(condition, format, args...)                              \
-  do {                                                                         \
-    if (condition) {                                                           \
-      smf::internal_logger::get().trace("D {}:{}] (" #condition ") " format,   \
-                                        __FILENAME__, __LINE__, ##args);       \
-    }                                                                          \
-  } while (false)
-#define DLOG_THROW_IF(condition, format, args...)                              \
-  do {                                                                         \
-    if (SMF_UNLIKELY(condition)) {                                             \
-      smf::internal_logger::get().error("D {}:{}] (" #condition ") " format,   \
-                     __FILENAME__, __LINE__, ##args);                          \
-      auto __smflog_s = fmt::sprintf("D {}:{}] (" #condition ") " format,    \
-                     __FILENAME__, __LINE__, ##args);                          \
-      throw std::runtime_error(__smflog_s.c_str());                            \
-    }                                                                          \
-  } while (false)
+#define DLOG_ERROR(...) \
+  smf::log_detail::dlog_error(std::source_location::current(), __VA_ARGS__)
+
+#define DLOG_WARN(...) \
+  smf::log_detail::dlog_warn(std::source_location::current(), __VA_ARGS__)
+
+#define DLOG_DEBUG(...) \
+  smf::log_detail::dlog_debug(std::source_location::current(), __VA_ARGS__)
+
+#define DLOG_TRACE(...) \
+  smf::log_detail::dlog_trace(std::source_location::current(), __VA_ARGS__)
+
+#define DLOG_INFO_IF(condition, ...) \
+  do { if (condition) { DLOG_INFO(__VA_ARGS__); } } while (false)
+
+#define DLOG_ERROR_IF(condition, ...) \
+  do { if (condition) { DLOG_ERROR(__VA_ARGS__); } } while (false)
+
+#define DLOG_DEBUG_IF(condition, ...) \
+  do { if (condition) { DLOG_DEBUG(__VA_ARGS__); } } while (false)
+
+#define DLOG_WARN_IF(condition, ...) \
+  do { if (condition) { DLOG_WARN(__VA_ARGS__); } } while (false)
+
+#define DLOG_TRACE_IF(condition, ...) \
+  do { if (condition) { DLOG_TRACE(__VA_ARGS__); } } while (false)
+
+#define DLOG_THROW_IF(condition, ...) \
+  smf::log_detail::dlog_throw_if((condition), std::source_location::current(), __VA_ARGS__)
 
 #else
 #define DTHROW_IFNULL(x) (x)
-#define DLOG_INFO(format, args...) ((void)0)
-#define DLOG_ERROR(format, args...) ((void)0)
-#define DLOG_WARN(format, args...) ((void)0)
-#define DLOG_DEBUG(format, args...) ((void)0)
-#define DLOG_TRACE(format, args...) ((void)0)
-#define DLOG_THROW(format, args...) ((void)0)
-#define DLOG_INFO_IF(condition, format, args...) ((void)0)
-#define DLOG_ERROR_IF(condition, format, args...) ((void)0)
-#define DLOG_DEBUG_IF(condition, format, args...) ((void)0)
-#define DLOG_WARN_IF(condition, format, args...) ((void)0)
-#define DLOG_TRACE_IF(condition, format, args...) ((void)0)
-#define DLOG_THROW_IF(condition, format, args...)                              \
-  smf::log_detail::noop(condition, format, ##args);
+#define DLOG_INFO(...) ((void)0)
+#define DLOG_ERROR(...) ((void)0)
+#define DLOG_WARN(...) ((void)0)
+#define DLOG_DEBUG(...) ((void)0)
+#define DLOG_TRACE(...) ((void)0)
+#define DLOG_THROW(...) ((void)0)
+#define DLOG_INFO_IF(condition, ...) ((void)0)
+#define DLOG_ERROR_IF(condition, ...) ((void)0)
+#define DLOG_DEBUG_IF(condition, ...) ((void)0)
+#define DLOG_WARN_IF(condition, ...) ((void)0)
+#define DLOG_TRACE_IF(condition, ...) ((void)0)
+#define DLOG_THROW_IF(condition, ...) ((void)0)
 #endif
 
 #endif  // SMF_PLATFORM_LOG_H

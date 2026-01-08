@@ -23,11 +23,13 @@
 module;
 #endif
 
+#include <cassert>
+#include <concepts>
+#include <gnutls/gnutls.h>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <utility>
-#include <seastar/util/concepts.hh>
 
 #ifdef SEASTAR_MODULE
 module seastar;
@@ -35,12 +37,12 @@ module seastar;
 #include <seastar/core/loop.hh>
 #include <seastar/core/when_all.hh>
 #include <seastar/core/reactor.hh>
-#include <seastar/net/tls.hh>
 #include <seastar/http/client.hh>
 #include <seastar/http/request.hh>
 #include <seastar/http/reply.hh>
 #include <seastar/http/response_parser.hh>
 #include <seastar/http/internal/content_source.hh>
+#include <seastar/util/defer.hh>
 #include <seastar/util/short_streams.hh>
 #include <seastar/util/string_utils.hh>
 #endif
@@ -88,8 +90,8 @@ future<> connection::write_body(const request& req) {
         return req.body_writer(internal::make_http_chunked_output_stream(_write_buf)).then([this] {
             return _write_buf.write("0\r\n\r\n");
         });
-    } else if (!req.content.empty()) {
-        return _write_buf.write(req.content);
+    } else if (auto& c = internal::deprecated_content(req); !c.empty()) {
+        return _write_buf.write(c);
     } else {
         return make_ready_future<>();
     }
@@ -111,15 +113,12 @@ future<connection::reply_ptr> connection::maybe_wait_for_continue(const request&
     });
 }
 
-void connection::setup_request(request& req) {
+static void validate_request(const request& req) {
     if (req._version.empty()) {
-        req._version = "1.1";
+        throw std::runtime_error("HTTP version not set");
     }
-    if (req.content_length != 0) {
-        if (!req.body_writer && req.content.empty()) {
-            throw std::runtime_error("Request body writer not set and content is empty");
-        }
-        req._headers["Content-Length"] = to_sstring(req.content_length);
+    if (req.content_length != 0 && !req.body_writer && internal::deprecated_content(req).empty()) {
+        throw std::runtime_error("Request body writer not set and content is empty");
     }
 }
 
@@ -137,7 +136,12 @@ future<connection::reply_ptr> connection::recv_reply() {
         parser.init();
         return _read_buf.consume(parser).then([this, &parser] {
             if (parser.eof()) {
-                throw std::runtime_error("Invalid response");
+                http_log.trace("Parsing response EOFed");
+                throw std::system_error(ECONNABORTED, std::system_category());
+            }
+            if (parser.failed()) {
+                http_log.trace("Parsing response failed");
+                throw httpd::response_parsing_exception(format("Invalid http server response. Reason: {}", parser.error_message()));
             }
 
             auto resp = parser.get_parsed_response();
@@ -151,19 +155,16 @@ future<connection::reply_ptr> connection::recv_reply() {
     });
 }
 
-future<connection::reply_ptr> connection::do_make_request(request req) {
-    return do_with(std::move(req), [this] (auto& req) {
-        setup_request(req);
-        return send_request_head(req).then([this, &req] {
-            return maybe_wait_for_continue(req).then([this, &req] (reply_ptr cont) {
-                if (cont) {
-                    return make_ready_future<reply_ptr>(std::move(cont));
-                }
+future<connection::reply_ptr> connection::do_make_request(const request& req) {
+    return send_request_head(req).then([this, &req] {
+        return maybe_wait_for_continue(req).then([this, &req] (reply_ptr cont) {
+            if (cont) {
+                return make_ready_future<reply_ptr>(std::move(cont));
+            }
 
-                return write_body(req).then([this] {
-                    return _write_buf.flush().then([this] {
-                        return recv_reply();
-                    });
+            return write_body(req).then([this] {
+                return _write_buf.flush().then([this] {
+                    return recv_reply();
                 });
             });
         });
@@ -171,21 +172,36 @@ future<connection::reply_ptr> connection::do_make_request(request req) {
 }
 
 future<reply> connection::make_request(request req) {
-    return do_make_request(std::move(req)).then([] (reply_ptr rep) {
-        return make_ready_future<reply>(std::move(*rep));
+    try {
+        validate_request(req);
+    } catch (...) {
+        return current_exception_as_future<reply>();
+    }
+    return do_with(std::move(req), [this] (auto& req) {
+        return do_make_request(req).then([] (reply_ptr rep) {
+            return make_ready_future<reply>(std::move(*rep));
+        });
     });
 }
 
 input_stream<char> connection::in(reply& rep) {
     if (seastar::internal::case_insensitive_cmp()(rep.get_header("Transfer-Encoding"), "chunked")) {
-        return input_stream<char>(data_source(std::make_unique<httpd::internal::chunked_source_impl>(_read_buf, rep.chunk_extensions, rep.trailing_headers)));
+        return input_stream<char>(data_source(std::make_unique<httpd::internal::chunked_source_impl>(_read_buf, rep.chunk_extensions, rep.trailing_headers, rep.left_content_length)));
     }
 
-    return input_stream<char>(data_source(std::make_unique<httpd::internal::content_length_source_impl>(_read_buf, rep.content_length)));
+    return input_stream<char>(data_source(std::make_unique<httpd::internal::content_length_source_impl>(_read_buf, rep.content_length, rep.left_content_length)));
+}
+
+void connection::shutdown() noexcept {
+    _persistent = false;
+    _fd.shutdown_input();
 }
 
 future<> connection::close() {
-    return when_all(_read_buf.close(), _write_buf.close()).discard_result().then([this] {
+    // #2661. At least output stream close can fail with exception, because
+    // the stream will do a flush. If connection never managed to send data, we
+    // will throw again here. Need to suppress these exceptions.
+    return when_all(_read_buf.close().handle_exception([](auto&&){}), _write_buf.close().handle_exception([](auto&&){})).discard_result().then([this] {
         auto la = _fd.local_address();
         return std::move(_closed).then([la = std::move(la)] {
             http_log.trace("destroyed connection {}", la);
@@ -193,51 +209,40 @@ future<> connection::close() {
     });
 }
 
-class basic_connection_factory : public connection_factory {
-    socket_address _addr;
-public:
-    explicit basic_connection_factory(socket_address addr)
-            : _addr(std::move(addr))
-    {
-    }
-    virtual future<connected_socket> make() override {
-        return seastar::connect(_addr, {}, transport::TCP);
-    }
-};
-
 client::client(socket_address addr)
         : client(std::make_unique<basic_connection_factory>(std::move(addr)))
 {
 }
-
-class tls_connection_factory : public connection_factory {
-    socket_address _addr;
-    shared_ptr<tls::certificate_credentials> _creds;
-    sstring _host;
-public:
-    tls_connection_factory(socket_address addr, shared_ptr<tls::certificate_credentials> creds, sstring host)
-            : _addr(std::move(addr))
-            , _creds(std::move(creds))
-            , _host(std::move(host))
-    {
-    }
-    virtual future<connected_socket> make() override {
-        return tls::connect(_creds, _addr, tls::tls_options{.server_name = _host});
-    }
-};
 
 client::client(socket_address addr, shared_ptr<tls::certificate_credentials> creds, sstring host)
         : client(std::make_unique<tls_connection_factory>(std::move(addr), std::move(creds), std::move(host)))
 {
 }
 
-client::client(std::unique_ptr<connection_factory> f, unsigned max_connections)
-        : _new_connections(std::move(f))
-        , _max_connections(max_connections)
-{
+static std::unique_ptr<retry_strategy> get_strategy(client::retry_requests retry) {
+    if (retry == client::retry_requests::no) {
+        return std::make_unique<no_retry_strategy>();
+    }
+    return std::make_unique<default_retry_strategy>();
 }
 
-future<client::connection_ptr> client::get_connection() {
+client::client(std::unique_ptr<connection_factory> f, unsigned max_connections, retry_requests retry, size_t max_bytes_to_drain) : client(
+    std::move(f),
+    max_connections,
+    max_bytes_to_drain,
+    get_strategy(retry)) {
+}
+
+client::client(std::unique_ptr<connection_factory> f, unsigned max_connections, size_t max_bytes_to_drain, std::unique_ptr<retry_strategy>&& retry_strategy)
+        : _new_connections(std::move(f))
+        , _max_connections(max_connections)
+        , _max_bytes_to_drain(max_bytes_to_drain)
+        , _retry_strategy(std::move(retry_strategy))
+{
+    assert(_retry_strategy);
+}
+
+future<client::connection_ptr> client::get_connection(abort_source* as) {
     if (!_pool.empty()) {
         connection_ptr con = _pool.front().shared_from_this();
         _pool.pop_front();
@@ -246,13 +251,21 @@ future<client::connection_ptr> client::get_connection() {
     }
 
     if (_nr_connections >= _max_connections) {
-        return _wait_con.wait().then([this] {
-            return get_connection();
+        auto sub = as ? as->subscribe([this] () noexcept { _wait_con.broadcast(); }) : std::nullopt;
+        return _wait_con.wait().then([this, as, sub = std::move(sub)] {
+            if (as != nullptr && as->abort_requested()) {
+                return make_exception_future<client::connection_ptr>(as->abort_requested_exception_ptr());
+            }
+            return get_connection(as);
         });
     }
 
+    return make_connection(as);
+}
+
+future<client::connection_ptr> client::make_connection(abort_source* as) {
     _total_new_connections++;
-    return _new_connections->make().then([cr = internal::client_ref(this)] (connected_socket cs) mutable {
+    return _new_connections->make(as).then([cr = internal::client_ref(this)] (connected_socket cs) mutable {
         http_log.trace("created new http connection {}", cs.local_address());
         auto con = seastar::make_shared<connection>(std::move(cs), std::move(cr));
         return make_ready_future<connection_ptr>(std::move(con));
@@ -300,39 +313,146 @@ future<> client::set_maximum_connections(unsigned nr) {
     return shrink_connections();
 }
 
-template <typename Fn>
-SEASTAR_CONCEPT( requires std::invocable<Fn, connection&> )
-auto client::with_connection(Fn&& fn) {
-    return get_connection().then([this, fn = std::move(fn)] (connection_ptr con) mutable {
+template <std::invocable<connection&> Fn>
+auto client::with_connection(Fn&& fn, abort_source* as) {
+    return get_connection(as).then([this, fn = std::move(fn)] (connection_ptr con) mutable {
         return fn(*con).finally([this, con = std::move(con)] () mutable {
             return put_connection(std::move(con));
         });
     });
 }
 
-future<> client::make_request(request req, reply_handler handle, std::optional<reply::status_type> expected) {
-    return with_connection([req = std::move(req), handle = std::move(handle), expected] (connection& con) mutable {
-        return con.do_make_request(std::move(req)).then([&con, expected, handle = std::move(handle)] (connection::reply_ptr reply) mutable {
-            auto& rep = *reply;
-            if (expected.has_value() && rep._status != expected.value()) {
-                if (!http_log.is_enabled(log_level::debug)) {
-                    return make_exception_future<>(httpd::unexpected_status_error(rep._status));
-                }
-
-                return do_with(con.in(rep), [reply = std::move(reply)] (auto& in) mutable {
-                    return util::read_entire_stream_contiguous(in).then([reply = std::move(reply)] (auto message) {
-                        http_log.debug("request finished with {}: {}", reply->_status, message);
-                        return make_exception_future<>(httpd::unexpected_status_error(reply->_status));
-                    });
-                });
-            }
-
-            return handle(rep, con.in(rep)).finally([reply = std::move(reply)] {});
-        }).handle_exception([&con] (auto ex) mutable {
-            con._persistent = false;
-            return make_exception_future<>(std::move(ex));
+template <typename Fn>
+requires std::invocable<Fn, connection&>
+auto client::with_new_connection(Fn&& fn, abort_source* as) {
+    return make_connection(as).then([this, fn = std::move(fn)] (connection_ptr con) mutable {
+        return fn(*con).finally([this, con = std::move(con)] () mutable {
+            return put_connection(std::move(con));
         });
     });
+}
+
+future<> client::make_request(request&& req, reply_handler&& handle, std::optional<reply::status_type>&& expected, abort_source* as) {
+    return do_with(std::move(req), std::move(handle), [this, expected, as](const request& req, reply_handler& handle) mutable {
+        return make_request(req, handle, expected, as);
+    });
+}
+
+future<> client::make_request(request&& req, reply_handler&& handle, const retry_strategy& strategy, std::optional<reply::status_type>&& expected, abort_source* as) {
+    return do_with(std::move(req), std::move(handle), [this, &strategy, expected, as](const request& req, reply_handler& handle) mutable {
+        return make_request(req, handle, strategy, expected, as);
+    });
+}
+
+future<> client::make_request(const request& req, reply_handler& handle, std::optional<reply::status_type> expected, abort_source* as) {
+    return make_request(req, handle, *_retry_strategy, expected, as);
+}
+
+future<> client::maybe_retry_request(std::exception_ptr ex,
+                                     unsigned retry_count,
+                                     const request& req,
+                                     reply_handler& handle,
+                                     const retry_strategy& strategy,
+                                     std::optional<reply::status_type> expected,
+                                     abort_source* as) {
+    return strategy.should_retry(ex, retry_count).then([this, ex = std::move(ex), retry_count, &req, &handle, &strategy, as, expected](bool retry) mutable {
+        if (!retry) {
+            return make_exception_future<>(std::move(ex));
+        }
+        return with_new_connection([this, &req, &handle, as, expected](connection& con) {
+                                       return do_make_request(con, req, handle, as, expected);
+                                   },
+                                   as).handle_exception([this, retry_count, &req, &handle, &strategy, as, expected](std::exception_ptr ex) {
+            return maybe_retry_request(std::move(ex), retry_count + 1, req, handle, strategy, expected, as);
+        });
+    });
+}
+
+future<> client::make_request(const request& req, reply_handler& handle, const retry_strategy& strategy, std::optional<reply::status_type> expected, abort_source* as) {
+    if (as && as->abort_requested()) {
+        return make_exception_future(as->abort_requested_exception_ptr());
+    }
+    try {
+        validate_request(req);
+    } catch (...) {
+        return current_exception_as_future();
+    }
+    return with_connection([this, &req, &handle, as, expected] (connection& con) {
+        return do_make_request(con, req, handle, as, expected);
+    }, as).handle_exception([this, &req, &handle, &strategy, as, expected] (std::exception_ptr ex) {
+        if (as && as->abort_requested()) {
+            return make_exception_future<>(as->abort_requested_exception_ptr());
+        }
+        return maybe_retry_request(std::move(ex), 0, req, handle, strategy, expected, as);
+    });
+}
+
+class skip_body_source : public data_source_impl {
+public:
+    skip_body_source(reply& rep) {
+        // nothing to consume here
+        rep.left_content_length = 0;
+        http_log.trace("Skipping HEAD reply body");
+    }
+
+    virtual future<temporary_buffer<char>> skip(uint64_t n) override {
+        return make_ready_future<temporary_buffer<char>>();
+    }
+
+    virtual future<temporary_buffer<char>> get() override {
+        return make_ready_future<temporary_buffer<char>>();
+    }
+};
+
+future<> client::do_make_request(connection& con, const request& req, reply_handler& handle, abort_source* as, std::optional<reply::status_type> expected) {
+    auto sub = as ? as->subscribe([&con] () noexcept { con.shutdown(); }) : std::nullopt;
+    return con.do_make_request(req).then([this, &con, &req, &handle, expected] (connection::reply_ptr reply) mutable {
+        auto& rep = *reply;
+        if (expected.has_value() && rep._status != expected.value()) {
+            if (!http_log.is_enabled(log_level::debug)) {
+                return make_exception_future<>(httpd::unexpected_status_error(rep._status));
+            }
+
+            return do_with(con.in(rep), [reply = std::move(reply)] (auto& in) mutable {
+                return util::read_entire_stream_contiguous(in).then([reply = std::move(reply)] (auto message) {
+                    http_log.debug("request finished with {}: {}", reply->_status, message);
+                    return make_exception_future<>(httpd::unexpected_status_error(reply->_status));
+                });
+            });
+        }
+
+        auto in = req._method != "HEAD" ? con.in(rep) : input_stream<char>(data_source(std::make_unique<skip_body_source>(rep)));
+        return handle(rep, std::move(in)).then([this, reply = std::move(reply), &con] {
+            if (reply->left_content_length > 0) {
+                auto bytes_left = reply->left_content_length;
+                /*
+                 * Reply with known body size (content_length_source_impl) tracks this counter
+                 * carefully and sets it with the exact number of bytes left to be read. If this
+                 * value is low enough, it's cheaper to read the body up to the end and instantly
+                 * discard it rather than to close the connection and establish a new one for
+                 * next request.
+                 *
+                 * Reply with "dynamic" body (chunked_source_impl) will set this counter to zero
+                 * after reading all body contents, otherwise it will be set to maximum uint64_t
+                 * value, so the below check will be false in this case.
+                 *
+                 * The "HEAD" reply doesn't have body and will report zero left bytes.
+                 */
+                if (bytes_left <= _max_bytes_to_drain) {
+                    http_log.trace("content was not fully consumed, {} bytes were left behind, skipping and returning the connection to the pool", bytes_left);
+                    return con._read_buf.skip(bytes_left);
+                }
+                http_log.trace("content was not fully consumed, content length is {} but {} left, will close the connection",
+                               reply->content_length,
+                               reply->left_content_length);
+                con._persistent = false;
+            }
+            return make_ready_future<>();
+        });
+    }).handle_exception([&con] (auto ex) mutable {
+        con._persistent = false;
+        return make_exception_future<>(std::move(ex));
+    }).finally([sub = std::move(sub)] {});
 }
 
 future<> client::close() {

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.7.0)
 project(SMF VERSION "0.1.0" LANGUAGES CXX C)
 
+# Set C++23 standard
+# Using default compiler with C++23 standard
+# set(CMAKE_CXX_COMPILER "g++-15")
+# set(CMAKE_C_COMPILER "gcc-15")
+
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake/)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
@@ -14,7 +19,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
 if(NOT CMAKE_BUILD_TYPE)
    set(CMAKE_BUILD_TYPE Release)
 endif()
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(SMF_BUILD_PROGRAMS "Build smf programs and demos" ON)

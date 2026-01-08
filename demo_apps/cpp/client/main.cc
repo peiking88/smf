@@ -109,9 +109,9 @@ main(int args, char **argv, char **env) {
         LOG_INFO("Setting ca-certificate client");
         auto builder = seastar::tls::credentials_builder();
         builder.set_x509_trust_file(ca_cert, seastar::tls::x509_crt_format::PEM)
-          .get0();
+          .get();
         largs.credentials =
-          builder.build_reloadable_certificate_credentials().get0();
+          builder.build_reloadable_certificate_credentials().get();
       }
 
       LOG_INFO("Load args: {}", largs);

@@ -21,15 +21,7 @@
 
 #pragma once
 
-#include <seastar/util/modules.hh>
 
-#ifndef SEASTAR_MODULE
-
-#include <optional>
-#include <string_view>
-#include <variant>
-
-#include <filesystem>
 
 #if __has_include(<memory_resource>)
 #include <memory_resource>
@@ -40,13 +32,7 @@ namespace std::pmr {
 }
 #endif
 
-#if defined(__cpp_impl_coroutine) || defined(__cpp_coroutines)
-#if __has_include(<coroutine>)
-#define SEASTAR_COROUTINES_ENABLED
-#else
-#error Please use a C++ compiler with C++20 coroutines support
-#endif
-#endif
+#include <source_location>
 
 // Defining SEASTAR_ASAN_ENABLED in here is a bit of a hack, but
 // convenient since it is build system independent and in practice
@@ -61,30 +47,12 @@ namespace std::pmr {
 #define SEASTAR_ASAN_ENABLED
 #endif
 
-#if __has_include(<source_location>)
-#include <source_location>
-#endif
-
-#if defined(__cpp_lib_source_location) && !defined(SEASTAR_BROKEN_SOURCE_LOCATION)
-// good
-#elif __has_include(<experimental/source_location>) && !defined(SEASTAR_BROKEN_SOURCE_LOCATION)
-#include <experimental/source_location>
-#else
-#include <seastar/util/source_location-compat.hh>
-#endif
-
-#endif // !defined(SEASTAR_MODULE)
-
 namespace seastar::compat {
-SEASTAR_MODULE_EXPORT_BEGIN
 
-#if defined(__cpp_lib_source_location) && !defined(SEASTAR_BROKEN_SOURCE_LOCATION)
-using source_location = std::source_location;
-#elif __has_include(<experimental/source_location>) && !defined(SEASTAR_BROKEN_SOURCE_LOCATION)
-using source_location = std::experimental::source_location;
-#else
-using source_location = seastar::internal::source_location;
-#endif
+// Deprecated: use std::source_location directly.
+// This alias is maintained for backwards compatibility with external users.
+using source_location
+    [[deprecated("Use std::source_location instead of seastar::compat::source_location")]]
+    = std::source_location;
 
-SEASTAR_MODULE_EXPORT_END
 }

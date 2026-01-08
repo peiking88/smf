@@ -7,6 +7,8 @@
 #include <seastar/net/tls.hh>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include <smf/log.h>
 
 namespace smf {
@@ -51,3 +53,18 @@ operator<<(std::ostream &o, const smf::load_generator_args &args) {
   return o;
 }
 }  // namespace std
+
+template <>
+struct fmt::formatter<smf::load_generator_args> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  
+  template <typename FormatContext>
+  auto format(const smf::load_generator_args& args, FormatContext& ctx) const {
+    return fmt::format_to(ctx.out(),
+      "generator_args{{ip={}, port={}, num_of_req={}, concurrency={}, memory_per_client={}, compression={}, cfg_size={}}}",
+      args.ip, args.port, args.num_of_req, args.concurrency, 
+      args.memory_per_core / args.concurrency,
+      smf::rpc::EnumNamecompression_flags(args.compression),
+      args.cfg.size());
+  }
+};

@@ -19,9 +19,7 @@
  * Copyright 2021 ScyllaDB
  */
 
-#include <exception>
-
-#include <boost/range/irange.hpp>
+#include <ranges>
 
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
@@ -30,12 +28,9 @@
 #include <seastar/util/closeable.hh>
 #include <seastar/core/loop.hh>
 
-using namespace seastar;
+#include "expected_exception.hh"
 
-class expected_exception : public std::runtime_error {
-public:
-    expected_exception() : runtime_error("expected") {}
-};
+using namespace seastar;
 
 SEASTAR_TEST_CASE(deferred_close_test) {
   return do_with(gate(), 0, 42, [] (gate& g, int& count, int& expected) {
@@ -363,7 +358,7 @@ SEASTAR_TEST_CASE(gate_holder_parallel_copy_test) {
             auto gh = g.hold();
             // Copying the gate::holder in the lambda below should keep it open
             // until all instances complete
-            (void)parallel_for_each(boost::irange(0, expected), [&count, gh = gh] (int) {
+            (void)parallel_for_each(std::views::iota(0, expected), [&count, gh = gh] (int) {
                 count++;
                 return make_ready_future<>();
             });
@@ -377,4 +372,20 @@ SEASTAR_TEST_CASE(gate_holder_parallel_copy_test) {
             BOOST_REQUIRE_EQUAL(count, expected);
         });
     });
+}
+
+SEASTAR_THREAD_TEST_CASE(gate_holder_try_close_test) {
+    gate g;
+    auto gh0 = g.try_hold();
+    BOOST_CHECK(gh0.has_value());
+    auto fut = g.close();
+    BOOST_CHECK(g.is_closed());
+    auto failed_gh = g.try_hold();
+    BOOST_CHECK(!failed_gh.has_value());
+    auto gh1 = std::move(gh0);
+    BOOST_CHECK(!fut.available());
+    gh0.reset();
+    BOOST_CHECK(!fut.available());
+    gh1.reset();
+    fut.get();
 }

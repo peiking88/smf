@@ -21,17 +21,16 @@
 
 #pragma once
 
-#ifndef SEASTAR_MODULE
+#include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/chunked_fifo.hh>
-#include <seastar/util/modules.hh>
-#include <cassert>
+#include <seastar/util/assert.hh>
+#include <mutex>
 #include <utility>
-#endif
+#include <shared_mutex>
 
 namespace seastar {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 /// \addtogroup fiber-module
 /// @{
@@ -95,7 +94,7 @@ public:
     }
     /// Unlocks a \c shared_mutex after a previous call to \ref lock_shared().
     void unlock_shared() noexcept {
-        assert(_readers > 0);
+        SEASTAR_ASSERT(_readers > 0);
         --_readers;
         wake();
     }
@@ -126,7 +125,7 @@ public:
     }
     /// Unlocks a \c shared_mutex after a previous call to \ref lock().
     void unlock() noexcept {
-        assert(_writer);
+        SEASTAR_ASSERT(_writer);
         _writer = false;
         wake();
     }
@@ -161,16 +160,10 @@ private:
 /// \return whatever \c func returns, as a future
 ///
 /// \relates shared_mutex
-template <typename Func>
-SEASTAR_CONCEPT(
-    requires (std::invocable<Func> && std::is_nothrow_move_constructible_v<Func>)
+template <std::invocable Func>
+    requires std::is_nothrow_move_constructible_v<Func>
     inline
     futurize_t<std::invoke_result_t<Func>>
-)
-SEASTAR_NO_CONCEPT(
-    inline
-    std::enable_if_t<std::is_nothrow_move_constructible_v<Func>, futurize_t<std::result_of_t<Func ()>>>
-)
 with_shared(shared_mutex& sm, Func&& func) noexcept {
     return sm.lock_shared().then([&sm, func = std::forward<Func>(func)] () mutable {
         return futurize_invoke(func).finally([&sm] {
@@ -179,16 +172,10 @@ with_shared(shared_mutex& sm, Func&& func) noexcept {
     });
 }
 
-template <typename Func>
-SEASTAR_CONCEPT(
-    requires (std::invocable<Func> && !std::is_nothrow_move_constructible_v<Func>)
+template <std::invocable Func>
+    requires (!std::is_nothrow_move_constructible_v<Func>)
     inline
     futurize_t<std::invoke_result_t<Func>>
-)
-SEASTAR_NO_CONCEPT(
-    inline
-    std::enable_if_t<!std::is_nothrow_move_constructible_v<Func>, futurize_t<std::result_of_t<Func ()>>>
-)
 with_shared(shared_mutex& sm, Func&& func) noexcept {
     // FIXME: use a coroutine when c++17 support is dropped
     try {
@@ -214,16 +201,10 @@ with_shared(shared_mutex& sm, Func&& func) noexcept {
 /// \return whatever \c func returns, as a future
 ///
 /// \relates shared_mutex
-template <typename Func>
-SEASTAR_CONCEPT(
-    requires (std::invocable<Func> && std::is_nothrow_move_constructible_v<Func>)
+template <std::invocable Func>
+    requires std::is_nothrow_move_constructible_v<Func>
     inline
     futurize_t<std::invoke_result_t<Func>>
-)
-SEASTAR_NO_CONCEPT(
-    inline
-    std::enable_if_t<std::is_nothrow_move_constructible_v<Func>, futurize_t<std::result_of_t<Func ()>>>
-)
 with_lock(shared_mutex& sm, Func&& func) noexcept {
     return sm.lock().then([&sm, func = std::forward<Func>(func)] () mutable {
         return futurize_invoke(func).finally([&sm] {
@@ -233,16 +214,10 @@ with_lock(shared_mutex& sm, Func&& func) noexcept {
 }
 
 
-template <typename Func>
-SEASTAR_CONCEPT(
-    requires (std::invocable<Func> && !std::is_nothrow_move_constructible_v<Func>)
+template <std::invocable Func>
+    requires (!std::is_nothrow_move_constructible_v<Func>)
     inline
     futurize_t<std::invoke_result_t<Func>>
-)
-SEASTAR_NO_CONCEPT(
-    inline
-    std::enable_if_t<!std::is_nothrow_move_constructible_v<Func>, futurize_t<std::result_of_t<Func ()>>>
-)
 with_lock(shared_mutex& sm, Func&& func) noexcept {
     // FIXME: use a coroutine when c++17 support is dropped
     try {
@@ -258,7 +233,69 @@ with_lock(shared_mutex& sm, Func&& func) noexcept {
     }
 }
 
+namespace internal {
+
+/// Seastar analogue of the `BasicLockable` named requirement, see:
+///   [https://eel.is/c++draft/thread.req.lockable.basic#def:Cpp17BasicLockable]
+template <typename T>
+concept FutureBasicLockable = requires (T& t) {
+    { t.lock() } -> std::same_as<future<>>;
+    { t.unlock() } noexcept -> std::same_as<void>;
+};
+
+/// Seastar analogue of the `SharedLockable` named requirement, see:
+///   [https://eel.is/c++draft/thread.req.lockable.shared#def:Cpp17SharedLockable]
+/// It's called `basic` because the concept doesn't require the type
+/// to define `try_lock_shared()` method to satisfy the constraint, similarly
+/// to the `BasicLockable` named requirement.
+template <typename T>
+concept FutureBasicSharedLockable = requires (T& t) {
+    { t.lock_shared() } -> std::same_as<future<>>;
+    { t.unlock_shared() } noexcept -> std::same_as<void>;
+};
+
+} // namespace internal
+
+/// \brief Construct a RAII-based shared lock corresponding to a given object.
+///
+/// Since constructors cannot be exectued asynchronously, use this function
+/// to shared lock the passed object and construct an std::shared_lock
+/// that will unlock it when the lock is being destroyed.
+///
+/// The caller is responsible for keeping the passed object
+/// alive at least until the returned lock is destroyed.
+template <internal::FutureBasicSharedLockable T>
+future<std::shared_lock<T>> get_shared_lock(T& t) {
+    co_await t.lock_shared();
+
+    try {
+        co_return std::shared_lock<T>{t, std::adopt_lock_t{}};
+    } catch (...) {
+        t.unlock_shared();
+        throw;
+    }
+}
+
+/// \brief Construct a RAII-based unique lock corresponding to a given object.
+///
+/// Since constructors cannot be exectued asynchronously, use this function
+/// to lock the passed object and construct an std::unique_lock
+/// that will unlock it when the lock is being destroyed.
+///
+/// The caller is responsible for keeping the passed object
+/// alive at least until the returned lock is destroyed.
+template <internal::FutureBasicLockable T>
+future<std::unique_lock<T>> get_unique_lock(T& t) {
+    co_await t.lock();
+
+    try {
+        co_return std::unique_lock<T>{t, std::adopt_lock_t{}};
+    } catch (...) {
+        t.unlock();
+        throw;
+    }
+}
+
 /// @}
-SEASTAR_MODULE_EXPORT_END
 
 }

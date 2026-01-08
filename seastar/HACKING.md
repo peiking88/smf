@@ -75,12 +75,6 @@ Make sure you are in the "build" directory.
 ninja test_unit
 ```
 
-- Run distribution tests (these take a long time the first time, but then the dependencies are cached):
-
-```
-ninja test_dist
-```
-
 - Run all tests:
 
 ```
@@ -153,7 +147,7 @@ find_package (Seastar ${VERSION} REQUIRED)
 
 add_executable (my_program
   my_program.cc)
-  
+
 target_link_libraries (my_program
   PRIVATE Seastar::seastar)
 ```

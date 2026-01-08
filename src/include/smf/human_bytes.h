@@ -3,6 +3,7 @@
 #pragma once
 #include <iomanip>
 #include <ostream>
+#include <fmt/format.h>
 namespace smf {
 
 /// \brief prints a double as bytes, KB, MB, GB, TB, etc.
@@ -39,3 +40,24 @@ operator<<(std::ostream &o, smf::human_bytes h) {
 }
 
 }  // namespace smf
+
+template <>
+struct fmt::formatter<smf::human_bytes> {
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+  
+  template <typename FormatContext>
+  auto format(smf::human_bytes h, FormatContext& ctx) const {
+    if (h.data < 1024) {
+      if (h.data < 1) { h.data = 0; }
+      return fmt::format_to(ctx.out(), "{:.3f} bytes", h.data);
+    } else if ((h.data /= 1024.0) < 1000.0) {
+      return fmt::format_to(ctx.out(), "{:.3f} KB", h.data);
+    } else if ((h.data /= 1024.0) < 1000.0) {
+      return fmt::format_to(ctx.out(), "{:.3f} MB", h.data);
+    } else if ((h.data /= 1024.0) < 1000.0) {
+      return fmt::format_to(ctx.out(), "{:.3f} GB", h.data);
+    } else {
+      return fmt::format_to(ctx.out(), "{:.3f} TB", h.data);
+    }
+  }
+};

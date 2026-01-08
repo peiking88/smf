@@ -22,16 +22,18 @@
 
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
-#include <seastar/core/distributed.hh>
+#include <seastar/core/sharded.hh>
 #include <seastar/core/loop.hh>
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/core/print.hh>
+#include <seastar/util/assert.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/util/closeable.hh>
 #include <seastar/util/later.hh>
 #include <mutex>
+#include <ranges>
 
 using namespace seastar;
 using namespace std::chrono_literals;
@@ -49,7 +51,7 @@ struct async_service : public seastar::async_sharded_service<async_service> {
         });
     }
     virtual void check() {
-        assert(!deleted);
+        SEASTAR_ASSERT(!deleted);
     }
     future<> stop() { return make_ready_future<>(); }
 };
@@ -69,7 +71,7 @@ struct X {
 
 template <typename T, typename Func>
 future<> do_with_distributed(Func&& func) {
-    auto x = make_shared<distributed<T>>();
+    auto x = make_shared<sharded<T>>();
     return func(*x).finally([x] {
         return x->stop();
     }).finally([x]{});
@@ -118,7 +120,7 @@ SEASTAR_TEST_CASE(test_constructor_argument_is_passed_to_each_core) {
 }
 
 SEASTAR_TEST_CASE(test_map_reduce) {
-    return do_with_distributed<X>([] (distributed<X>& x) {
+    return do_with_distributed<X>([] (sharded<X>& x) {
         return x.start().then([&x] {
             return x.map_reduce0(std::mem_fn(&X::cpu_id_squared),
                                  0,
@@ -163,7 +165,7 @@ SEASTAR_TEST_CASE(test_map_reduce_lifetime) {
             });
         }
     };
-    return do_with_distributed<X>([] (distributed<X>& x) {
+    return do_with_distributed<X>([] (sharded<X>& x) {
         return x.start().then([&x] {
             return do_with(0L, [&x] (auto& result) {
                 return x.map_reduce(reduce{result}, map{}).then([&result] {
@@ -203,7 +205,7 @@ SEASTAR_TEST_CASE(test_map_reduce0_lifetime) {
             return res + x;
         }
     };
-    return do_with_distributed<X>([] (distributed<X>& x) {
+    return do_with_distributed<X>([] (sharded<X>& x) {
         return x.start().then([&x] {
             return x.map_reduce0(map{}, 0L, reduce{}).then([] (long result) {
                 long n = smp::count - 1;
@@ -229,7 +231,7 @@ SEASTAR_TEST_CASE(test_map_lifetime) {
             });
         }
     };
-    return do_with_distributed<X>([] (distributed<X>& x) {
+    return do_with_distributed<X>([] (sharded<X>& x) {
         return x.start().then([&x] {
             return x.map(map{}).then([] (std::vector<int> result) {
                 BOOST_REQUIRE_EQUAL(result.size(), smp::count);
@@ -242,7 +244,7 @@ SEASTAR_TEST_CASE(test_map_lifetime) {
 }
 
 SEASTAR_TEST_CASE(test_async) {
-    return do_with_distributed<async_service>([] (distributed<async_service>& x) {
+    return do_with_distributed<async_service>([] (sharded<async_service>& x) {
         return x.start().then([&x] {
             return x.invoke_on_all(&async_service::run);
         });
@@ -338,20 +340,20 @@ SEASTAR_TEST_CASE(test_smp_service_groups) {
     return async([] {
         smp_service_group_config ssgc1;
         ssgc1.max_nonlocal_requests = 1;
-        auto ssg1 = create_smp_service_group(ssgc1).get0();
+        auto ssg1 = create_smp_service_group(ssgc1).get();
         smp_service_group_config ssgc2;
         ssgc2.max_nonlocal_requests = 1000;
-        auto ssg2 = create_smp_service_group(ssgc2).get0();
+        auto ssg2 = create_smp_service_group(ssgc2).get();
         shard_id other_shard = smp::count - 1;
         remote_worker rm1(1);
         remote_worker rm2(1000);
-        auto bunch1 = parallel_for_each(boost::irange(0, 20), [&] (int ignore) { return rm1.do_remote_work(other_shard, ssg1); });
-        auto bunch2 = parallel_for_each(boost::irange(0, 2000), [&] (int ignore) { return rm2.do_remote_work(other_shard, ssg2); });
+        auto bunch1 = parallel_for_each(std::views::iota(0, 20), [&] (int ignore) { return rm1.do_remote_work(other_shard, ssg1); });
+        auto bunch2 = parallel_for_each(std::views::iota(0, 2000), [&] (int ignore) { return rm2.do_remote_work(other_shard, ssg2); });
         bunch1.get();
         bunch2.get();
         if (smp::count > 1) {
-            assert(rm1.max_concurrent_observed == 1);
-            assert(rm2.max_concurrent_observed == 1000);
+            SEASTAR_ASSERT(rm1.max_concurrent_observed == 1);
+            SEASTAR_ASSERT(rm2.max_concurrent_observed == 1000);
         }
         destroy_smp_service_group(ssg1).get();
         destroy_smp_service_group(ssg2).get();
@@ -363,10 +365,10 @@ SEASTAR_TEST_CASE(test_smp_service_groups_re_construction) {
     // holding the groups did not expand correctly. This test triggers the
     // bug.
     return async([] {
-        auto ssg1 = create_smp_service_group({}).get0();
-        auto ssg2 = create_smp_service_group({}).get0();
+        auto ssg1 = create_smp_service_group({}).get();
+        auto ssg2 = create_smp_service_group({}).get();
         destroy_smp_service_group(ssg1).get();
-        auto ssg3 = create_smp_service_group({}).get0();
+        auto ssg3 = create_smp_service_group({}).get();
         destroy_smp_service_group(ssg2).get();
         destroy_smp_service_group(ssg3).get();
     });
@@ -376,7 +378,7 @@ SEASTAR_TEST_CASE(test_smp_timeout) {
     return async([] {
         smp_service_group_config ssgc1;
         ssgc1.max_nonlocal_requests = 1;
-        auto ssg1 = create_smp_service_group(ssgc1).get0();
+        auto ssg1 = create_smp_service_group(ssgc1).get();
 
         auto _ = defer([ssg1] () noexcept {
             destroy_smp_service_group(ssg1).get();
@@ -448,6 +450,6 @@ SEASTAR_THREAD_TEST_CASE(test_sharded_parameter) {
             ).get();
     auto undo2 = deferred_stop(s_service);
 
-    auto all_ok = s_service.map_reduce0(std::mem_fn(&some_service::ok), true, std::multiplies<>()).get0();
+    auto all_ok = s_service.map_reduce0(std::mem_fn(&some_service::ok), true, std::multiplies<>()).get();
     BOOST_REQUIRE(all_ok);
 }

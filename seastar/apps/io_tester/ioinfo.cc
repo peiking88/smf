@@ -18,6 +18,7 @@
 /*
  * Copyright (C) 2021 ScyllaDB
  */
+#include <iostream>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/thread.hh>
 #include <seastar/core/reactor.hh>
@@ -34,30 +35,34 @@ int main(int ac, char** av) {
     auto opt_add = app.add_options();
     opt_add
         ("directory", bpo::value<sstring>()->default_value("."), "directory to work on")
+        ("max-reqsize", bpo::value<unsigned>()->default_value(128u * 1024u), "maximum request size in bytes used when calculating capacity (default: 128kB)")
     ;
 
     return app.run(ac, av, [&] {
         return seastar::async([&] {
             auto& opts = app.configuration();
             auto& storage = opts["directory"].as<sstring>();
+            auto max_reqsz = opts["max-reqsize"].as<unsigned>();
 
             YAML::Emitter out;
             out << YAML::BeginDoc;
             out << YAML::BeginMap;
 
             engine().open_file_dma(storage + "/tempfile", open_flags::rw | open_flags::create | open_flags::exclusive).then([&] (file f) {
-                return with_closeable(std::move(f), [&out, &storage] (file& f) {
+                return with_closeable(std::move(f), [&out, &storage, max_reqsz] (file& f) {
                     return remove_file(storage + "/tempfile").then([&out, &f] {
                         out << YAML::Key << "disk_read_max_length" << YAML::Value << f.disk_read_max_length();
                         out << YAML::Key << "disk_write_max_length" << YAML::Value << f.disk_write_max_length();
-                    }).then([&out, &f] {
-                        return f.stat().then([&out] (auto st) {
+                    }).then([&out, &f, max_reqsz] {
+                        return f.stat().then([&out, max_reqsz] (auto st) {
                             auto& ioq = engine().get_io_queue(st.st_dev);
                             auto& cfg = ioq.get_config();
 
+                            out << YAML::Key << "device" << YAML::Value << st.st_dev;
                             out << YAML::Key << "io_latency_goal_ms" << YAML::Value <<
                                     std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(cfg.rate_limit_duration).count();
                             out << YAML::Key << "io_queue" << YAML::BeginMap;
+                            out << YAML::Key << "id" << YAML::Value << ioq.id();
                             out << YAML::Key << "req_count_rate" << YAML::Value << cfg.req_count_rate;
                             out << YAML::Key << "blocks_count_rate" << YAML::Value << cfg.blocks_count_rate;
                             out << YAML::Key << "disk_req_write_to_read_multiplier" << YAML::Value << cfg.disk_req_write_to_read_multiplier;
@@ -66,7 +71,7 @@ int main(int ac, char** av) {
 
                             out << YAML::Key << "fair_queue" << YAML::BeginMap;
                             out << YAML::Key << "capacities" << YAML::BeginMap;
-                            for (size_t sz = 512; sz <= 128 * 1024; sz <<= 1) {
+                            for (size_t sz = 512; sz <= max_reqsz; sz <<= 1) {
                                 out << YAML::Key << sz << YAML::BeginMap;
                                 out << YAML::Key << "read" << YAML::Value << ioq.request_capacity(internal::io_direction_and_length(internal::io_direction_and_length::read_idx, sz));
                                 out << YAML::Key << "write" << YAML::Value << ioq.request_capacity(internal::io_direction_and_length(internal::io_direction_and_length::write_idx, sz));
@@ -74,7 +79,7 @@ int main(int ac, char** av) {
                             }
                             out << YAML::EndMap;
 
-                            const auto& fg = internal::get_fair_group(ioq, internal::io_direction_and_length::write_idx);
+                            const auto& fg = internal::get_throttler(ioq, internal::io_direction_and_length::write_idx);
                             out << YAML::Key << "per_tick_grab_threshold" << YAML::Value << fg.per_tick_grab_threshold();
 
                             const auto& tb = fg.token_bucket();

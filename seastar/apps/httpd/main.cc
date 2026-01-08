@@ -19,12 +19,14 @@
  * Copyright 2015 Cloudius Systems
  */
 
+#include <memory>
 #include <seastar/http/httpd.hh>
 #include <seastar/http/handlers.hh>
 #include <seastar/http/function_handlers.hh>
 #include <seastar/http/file_handler.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/reactor.hh>
+#include <seastar/core/app-template.hh>
 #include "demo.json.hh"
 #include <seastar/http/api_docs.hh>
 #include <seastar/core/thread.hh>
@@ -32,6 +34,7 @@
 #include <seastar/core/print.hh>
 #include <seastar/net/inet_address.hh>
 #include <seastar/util/defer.hh>
+#include <seastar/net/api.hh>
 #include "../lib/stop_signal.hh"
 
 namespace bpo = boost::program_options;
@@ -60,11 +63,14 @@ void set_routes(routes& r) {
     r.add(operation_type::GET, url("/jf"), h2);
     r.add(operation_type::GET, url("/file").remainder("path"),
             new directory_handler("/"));
+    r.add(operation_type::GET, url("/shard"), new function_handler([] (const_req req) {
+        return seastar::sstring(fmt::format("{}", seastar::this_shard_id()));
+    }));
     demo_json::hello_world.set(r, [] (const_req req) {
         demo_json::my_object obj;
         obj.var1 = req.param.at("var1");
         obj.var2 = req.param.at("var2");
-        demo_json::ns_hello_world::query_enum v = demo_json::ns_hello_world::str2query_enum(req.query_parameters.at("query_enum"));
+        demo_json::ns_hello_world::query_enum v = demo_json::ns_hello_world::str2query_enum(req.get_query_param("query_enum"));
         // This demonstrate enum conversion
         obj.enum_var = v;
         return obj;
@@ -72,11 +78,12 @@ void set_routes(routes& r) {
 }
 
 int main(int ac, char** av) {
-    httpd::http_server_control prometheus_server;
-    prometheus::config pctx;
     app_template app;
 
     app.add_options()("port", bpo::value<uint16_t>()->default_value(10000), "HTTP Server port");
+    app.add_options()("load-balancing-algorithm",
+            bpo::value<std::string>()->default_value("connection_distribution"),
+            "Load balancing algorithm: connection_distribution, port, fixed");
     app.add_options()("prometheus_port", bpo::value<uint16_t>()->default_value(9180), "Prometheus port. Set to zero in order to disable.");
     app.add_options()("prometheus_address", bpo::value<sstring>()->default_value("0.0.0.0"), "Prometheus address");
     app.add_options()("prometheus_prefix", bpo::value<sstring>()->default_value("seastar_httpd"), "Prometheus metrics prefix");
@@ -100,7 +107,6 @@ int main(int ac, char** av) {
                 prometheus::config pctx;
                 net::inet_address prom_addr(config["prometheus_address"].as<sstring>());
 
-                pctx.metric_help = "seastar::httpd server statistics";
                 pctx.prefix = config["prometheus_prefix"].as<sstring>();
 
                 std::cout << "starting prometheus API server" << std::endl;
@@ -118,7 +124,7 @@ int main(int ac, char** av) {
             }
 
             uint16_t port = config["port"].as<uint16_t>();
-            auto server = new http_server_control();
+            auto server = std::make_unique<http_server_control>();
             auto rb = make_shared<api_registry_builder>("apps/httpd/");
             server->start().get();
 
@@ -130,7 +136,22 @@ int main(int ac, char** av) {
             server->set_routes(set_routes).get();
             server->set_routes([rb](routes& r){rb->set_api_doc(r);}).get();
             server->set_routes([rb](routes& r) {rb->register_function(r, "demo", "hello world application");}).get();
-            server->listen(port).get();
+
+            auto lba_str = config["load-balancing-algorithm"].as<std::string>();
+            server_socket::load_balancing_algorithm lba;
+            if (lba_str == "connection_distribution") {
+                lba = server_socket::load_balancing_algorithm::connection_distribution;
+            } else if (lba_str == "port") {
+                lba = server_socket::load_balancing_algorithm::port;
+            } else if (lba_str == "fixed") {
+                lba = server_socket::load_balancing_algorithm::fixed;
+            } else {
+                throw std::runtime_error("Invalid load balancing algorithm: " + lba_str);
+            }
+
+            listen_options lo;
+            lo.lba = lba;
+            server->listen(socket_address{net::inet_address{}, port}, lo).get();
 
             std::cout << "Seastar HTTP server listening on port " << port << " ...\n";
 

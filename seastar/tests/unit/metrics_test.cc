@@ -20,22 +20,25 @@
  * Copyright (C) 2019 ScyllaDB.
  */
 
+#include <seastar/core/execution_stage.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/metrics.hh>
 #include <seastar/core/metrics_api.hh>
 #include <seastar/core/relabel_config.hh>
-#include <seastar/core/reactor.hh>
 #include <seastar/core/scheduling.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/sharded.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/core/io_queue.hh>
 #include <seastar/core/loop.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include <seastar/core/internal/estimated_histogram.hh>
+#include <seastar/testing/random.hh>
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 #include <seastar/testing/test_runner.hh>
 #include <boost/range/irange.hpp>
+#include <ranges>
 
 SEASTAR_TEST_CASE(test_add_group) {
     using namespace seastar::metrics;
@@ -67,8 +70,8 @@ static std::set<seastar::sstring> get_label_values(seastar::sstring metric_name,
     BOOST_REQUIRE(qp_group != cend(all_metadata));
     std::set<seastar::sstring> labels;
     for (const auto& metric : qp_group->metrics) {
-        const auto found = metric.id.labels().find(label_name);
-        BOOST_REQUIRE(found != metric.id.labels().cend());
+        const auto found = metric.labels().find(label_name);
+        BOOST_REQUIRE(found != metric.labels().cend());
         labels.insert(found->second);
     }
     return labels;
@@ -83,8 +86,8 @@ SEASTAR_THREAD_TEST_CASE(test_renaming_scheuling_groups) {
 
     static const char* name1 = "A";
     static const char* name2 = "B";
-    scheduling_group sg =  create_scheduling_group("hello", 111).get0();
-    boost::integer_range<int> rng(0, 1000);
+    scheduling_group sg =  create_scheduling_group("hello", 111).get();
+    auto rng = std::views::iota(0, 1000);
     // repeatedly change the group name back and forth in
     // decresing time intervals to see if it generate double
     //registration statistics errors.
@@ -120,65 +123,34 @@ SEASTAR_THREAD_TEST_CASE(test_renaming_scheuling_groups) {
     BOOST_REQUIRE((name1_found && !name2_found) || (name2_found && !name1_found));
 }
 
-#if SEASTAR_API_LEVEL < 7
-SEASTAR_THREAD_TEST_CASE(test_renaming_io_priority_classes) {
-    // this seams a little bit out of place but the
-    // renaming functionality is primarily for statistics
-    // otherwise those classes could have just been reused
-    // without renaming them.
+SEASTAR_THREAD_TEST_CASE(test_renaming_execution_stage) {
     using namespace seastar;
-    static const char* name1 = "A";
-    static const char* name2 = "B";
-    seastar::io_priority_class pc = io_priority_class::register_one("hello",100);
-    smp::invoke_on_all([&pc] () {
-        // this is a trick to get all of the queues actually register their
-        // stats.
-        return pc.update_shares(101);
-    }).get();
+    const sstring sg1_name = "sg1";
+    const sstring sg2_name = "sg2";
+    const sstring stage_name = "my_stage";
 
-    boost::integer_range<int> rng(0, 1000);
-    // repeatedly change the group name back and forth in
-    // decresing time intervals to see if it generate double
-    //registration statistics errors.
-    for (auto&& i : rng) {
-        const char* name = i%2 ? name1 : name2;
-        const char* prev_name = i%2 ? name2 : name1;
-        sleep(std::chrono::microseconds(100000/(i+1))).get();
-        pc.rename(name).get();
-        std::set<sstring> label_vals = get_label_values(sstring("io_queue_shares"), sstring("class"));
-        // validate that the name that we *renamed to* is in the stats
-        BOOST_REQUIRE(label_vals.find(sstring(name)) != label_vals.end());
-        // validate that the name that we *renamed from* is *not* in the stats
-        BOOST_REQUIRE(label_vals.find(sstring(prev_name)) == label_vals.end());
-    }
+    inheriting_concrete_execution_stage<void> stage{stage_name, []{}};
+    scheduling_group sg = create_scheduling_group(sg1_name, 111).get();
+    with_scheduling_group(sg, [&] { return stage(); }).get();
 
-    smp::invoke_on_all([&pc] () {
-        return do_with(std::uniform_int_distribution<int>(), boost::irange<int>(0, 1000),
-                [&pc] (std::uniform_int_distribution<int>& dist, boost::integer_range<int>& rng) {
-            // flip a fair coin and rename to one of two options and rename to that
-            // scheduling group name, do it 1000 in parallel on all shards so there
-            // is a chance of collision.
-            return do_for_each(rng, [&pc, &dist] (auto i) {
-                bool odd = dist(seastar::testing::local_random_engine)%2;
-                return pc.rename(odd ? name1 : name2);
-            });
-        });
-    }).get();
+    std::set<sstring> label_vals = get_label_values(sstring("execution_stages_tasks_scheduled"), sstring("execution_stage"));
+    BOOST_REQUIRE(label_vals.find(stage_name + sstring(".") + sstring(sg1_name)) != label_vals.end());
 
-    std::set<sstring> label_vals = get_label_values(sstring("io_queue_shares"), sstring("class"));
-    // validate that only one of the names is eventually in the metrics
-    bool name1_found = label_vals.find(sstring(name1)) != label_vals.end();
-    bool name2_found = label_vals.find(sstring(name2)) != label_vals.end();
-    BOOST_REQUIRE((name1_found && !name2_found) || (name2_found && !name1_found));
+    rename_scheduling_group(sg, sg2_name).get();
+
+    label_vals = get_label_values(sstring("execution_stages_tasks_scheduled"), sstring("execution_stage"));
+    BOOST_REQUIRE(label_vals.find(stage_name + sstring(".") + sstring(sg1_name)) == label_vals.end());
+    BOOST_REQUIRE(label_vals.find(stage_name + sstring(".") + sstring(sg2_name)) != label_vals.end());
+
+    destroy_scheduling_group(sg).get();
 }
-#endif
 
 int count_by_label(const std::string& label) {
     seastar::foreign_ptr<seastar::metrics::impl::values_reference> values = seastar::metrics::impl::get_values();
     int count = 0;
     for (auto&& md : (*values->metadata)) {
         for (auto&& mi : md.metrics) {
-            if (label == "" || mi.id.labels().find(label) != mi.id.labels().end()) {
+            if (label == "" || mi.labels().find(label) != mi.labels().end()) {
                 count++;
             }
         }
@@ -186,7 +158,7 @@ int count_by_label(const std::string& label) {
     return count;
 }
 
-int count_by_fun(std::function<bool(const seastar::metrics::impl::metric_info&)> f) {
+int count_by_fun(std::function<bool(const seastar::metrics::impl::metric_series_metadata&)> f) {
     seastar::foreign_ptr<seastar::metrics::impl::values_reference> values = seastar::metrics::impl::get_values();
     int count = 0;
     for (auto&& md : (*values->metadata)) {
@@ -222,6 +194,69 @@ SEASTAR_THREAD_TEST_CASE(test_relabel_add_labels) {
     });
     BOOST_CHECK_EQUAL(count_by_label("level"), 2);
     sm::set_relabel_configs({}).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_metrics_family_aggregate) {
+    using namespace seastar::metrics;
+    namespace sm = seastar::metrics;
+    sm::metric_groups app_metrics;
+    sm::label lb("lb");
+    app_metrics.add_group("test", {
+        sm::make_gauge("gauge_1", sm::description("gague 1"), [] { return 1; })(lb("1")),
+        sm::make_gauge("gauge_1", sm::description("gague 1"), [] { return 2; })(lb("2")),
+        sm::make_counter("counter_1", sm::description("counter 1"), [] { return 3; })(lb("1")),
+        sm::make_counter("counter_1", sm::description("counter 1"), [] { return 4; })(lb("2"))
+    });
+    std::vector<sm::relabel_config> rl(2);
+    rl[0].source_labels = {"__name__"};
+    rl[0].action = sm::relabel_config::relabel_action::drop;
+
+    rl[1].source_labels = {"lb"};
+    rl[1].action = sm::relabel_config::relabel_action::keep;
+    // Dropping the lev label would cause a conflict, but not crash the system
+    sm::set_relabel_configs(rl).get();
+
+    std::vector<sm::metric_family_config> fc(2);
+    fc[0].name = "test_gauge_1";
+    fc[0].aggregate_labels = { "lb" };
+    fc[1].regex_name = "test_gauge1.*";
+    fc[1].aggregate_labels = { "ll", "aa" };
+    sm::set_metric_family_configs(fc);
+    seastar::foreign_ptr<seastar::metrics::impl::values_reference> values = seastar::metrics::impl::get_values();
+    int count = 0;
+    for (auto&& md : (*values->metadata)) {
+        if (md.mf.name == "test_gauge_1") {
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels.size(), 1);
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels[0], "lb");
+        } else {
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels.size(), 0);
+        }
+        count++;
+    }
+    BOOST_CHECK_EQUAL(count, 2);
+    app_metrics.add_group("test", {
+        sm::make_gauge("gauge1_1", sm::description("gague 1"), [] { return 1; })(lb("1")),
+        sm::make_gauge("gauge1_1", sm::description("gague 1"), [] { return 2; })(lb("2")),
+        sm::make_counter("counter1_1", sm::description("counter 1"), [] { return 3; })(lb("1")),
+        sm::make_counter("counter1_1", sm::description("counter 1"), [] { return 4; })(lb("2"))
+    });
+    values = seastar::metrics::impl::get_values();
+    count = 0;
+    for (auto&& md : (*values->metadata)) {
+        if (md.mf.name == "test_gauge_1") {
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels.size(), 1);
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels[0], "lb");
+        } else if (md.mf.name == "test_gauge1_1") {
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels.size(), 2);
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels[0], "ll");
+        } else {
+            BOOST_CHECK_EQUAL(md.mf.aggregate_labels.size(), 0);
+        }
+        count++;
+    }
+    BOOST_CHECK_EQUAL(count, 4);
+    std::vector<sm::relabel_config> rl1;
+    sm::set_relabel_configs(rl1).get();
 }
 
 SEASTAR_THREAD_TEST_CASE(test_relabel_drop_label_prevent_runtime_conflicts) {
@@ -274,8 +309,8 @@ SEASTAR_THREAD_TEST_CASE(test_relabel_enable_disable_skip_when_empty) {
     sm::metric_relabeling_result success = sm::set_relabel_configs(rl).get();
     BOOST_CHECK_EQUAL(success.metrics_relabeled_due_to_collision, 0);
     BOOST_CHECK_EQUAL(count_by_label(""), 3);
-    BOOST_CHECK_EQUAL(count_by_fun([](const seastar::metrics::impl::metric_info& mi) {
-        return mi.should_skip_when_empty == sm::skip_when_empty::yes;
+    BOOST_CHECK_EQUAL(count_by_fun([](const seastar::metrics::impl::metric_series_metadata& mi) {
+        return mi.should_skip_when_empty() == sm::skip_when_empty::yes;
     }), 0);
 
     std::vector<sm::relabel_config> rl2(3);
@@ -293,8 +328,8 @@ SEASTAR_THREAD_TEST_CASE(test_relabel_enable_disable_skip_when_empty) {
     success = sm::set_relabel_configs(rl2).get();
     BOOST_CHECK_EQUAL(success.metrics_relabeled_due_to_collision, 0);
     BOOST_CHECK_EQUAL(count_by_label(""), 3);
-    BOOST_CHECK_EQUAL(count_by_fun([](const seastar::metrics::impl::metric_info& mi) {
-        return mi.should_skip_when_empty == sm::skip_when_empty::yes;
+    BOOST_CHECK_EQUAL(count_by_fun([](const seastar::metrics::impl::metric_series_metadata& mi) {
+        return mi.should_skip_when_empty() == sm::skip_when_empty::yes;
     }), 3);
     // clear the configuration
     success = sm::set_relabel_configs({}).get();
@@ -315,8 +350,8 @@ SEASTAR_THREAD_TEST_CASE(test_relabel_enable_disable_skip_when_empty) {
 
     success = sm::set_relabel_configs(rl3).get();
     BOOST_CHECK_EQUAL(success.metrics_relabeled_due_to_collision, 0);
-    BOOST_CHECK_EQUAL(count_by_fun([](const seastar::metrics::impl::metric_info& mi) {
-        return mi.should_skip_when_empty == sm::skip_when_empty::yes;
+    BOOST_CHECK_EQUAL(count_by_fun([](const seastar::metrics::impl::metric_series_metadata& mi) {
+        return mi.should_skip_when_empty() == sm::skip_when_empty::yes;
     }), 0);
     sm::set_relabel_configs({}).get();
 }

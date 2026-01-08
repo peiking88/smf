@@ -18,15 +18,14 @@
 /*
  * Copyright 2022 ScyllaDB
  */
-#ifndef SEASTAR_MODULE
+
+#pragma once
+
 #include <regex>
-#endif
-#include <seastar/util/modules.hh>
 
 namespace seastar {
 namespace metrics {
 
-SEASTAR_MODULE_EXPORT_BEGIN
 
 /*!
  * \brief a wrapper class around regex with the original expr
@@ -57,6 +56,13 @@ public:
         _regex_str = expr;
         _regex = std::regex(_regex_str);
         return *this;
+    }
+    bool empty() const noexcept {
+        return _regex_str.empty();
+    }
+
+    bool match(const std::string& str)  const noexcept {
+        return !empty() && std::regex_match(str, _regex);
     }
 };
 
@@ -103,7 +109,25 @@ struct relabel_config {
  */
 relabel_config::relabel_action relabel_config_action(const std::string& action);
 
-SEASTAR_MODULE_EXPORT_END
+/*!
+ * \brief metric_family_config allow changing metrics family configuration
+ *
+ * Allow changing metrics family configuration
+ * Supports changing the aggregation labels.
+ * The metrics family can be identified by a name or by regex; name-matching is
+ * more efficient and should be used for a single metrics family.
+ *
+ * name - optional exact metric name
+ * regex_name - if set, all the metrics name that match the regular expression
+ * aggregate_labels - The labels to aggregate the metrics by.
+ *
+ */
+struct metric_family_config {
+    std::string name;
+    relabel_config_regex regex_name = "";
+    std::vector<std::string> aggregate_labels;
+};
+
 
 }
 }

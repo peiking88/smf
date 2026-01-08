@@ -110,16 +110,11 @@ class lz4_fast_codec final : public codec {
     const int compressed_data_size =
       LZ4_compress_default(data, buf.get_write() + 4, size, max_dst_size);
 
-    LOG_THROW_IF(compressed_data_size < 0, ,
+    LOG_THROW_IF(compressed_data_size <= 0,
                  "A negative result from LZ4_compress_default indicates a "
                  "failure trying to compress the data.  See exit code {} "
                  "for value returned.",
                  compressed_data_size);
-
-    LOG_THROW_IF(compressed_data_size == 0,
-                 "A result of 0 means compression worked, but was stopped "
-                 "because the destination buffer couldn't hold all the "
-                 "information.");
 
     seastar::write_le<uint32_t>(buf.get_write(), size);
     buf.trim(compressed_data_size + 4);

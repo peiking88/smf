@@ -38,11 +38,6 @@ namespace httpd {
 
 using namespace std;
 
-void verify_param(const http::request& req, const sstring& param) {
-    if (req.get_query_param(param) == "") {
-        throw missing_param_exception(param);
-    }
-}
 routes::routes() : _general_handler([this](std::exception_ptr eptr) mutable {
     return exception_reply(eptr);
 }) {}
@@ -60,6 +55,15 @@ routes::~routes() {
     }
 
 }
+
+namespace internal {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+std::string to_json(const auto& e) {
+    return seastar::httpd::json_exception(e).to_json();
+}
+#pragma GCC diagnostic pop
+} // internal namespace
 
 std::unique_ptr<http::reply> routes::exception_reply(std::exception_ptr eptr) {
     auto rep = std::make_unique<http::reply>();
@@ -81,10 +85,10 @@ std::unique_ptr<http::reply> routes::exception_reply(std::exception_ptr eptr) {
        rep.reset(new http::reply());
        rep->add_header("Location", _e.url).set_status(_e.status());
     } catch (const base_exception& e) {
-        rep->set_status(e.status(), json_exception(e).to_json());
+        rep->set_status(e.status(), internal::to_json(e));
     } catch (...) {
         rep->set_status(http::reply::status_type::internal_server_error,
-                json_exception(std::current_exception()).to_json());
+                internal::to_json(std::current_exception()));
     }
 
     rep->done("json");
@@ -96,9 +100,7 @@ future<std::unique_ptr<http::reply> > routes::handle(const sstring& path, std::u
             normalize_url(path), req->param);
     if (handler != nullptr) {
         try {
-            for (auto& i : handler->_mandatory_param) {
-                verify_param(*req.get(), i);
-            }
+            handler->verify_mandatory_params(*req);
             auto r =  handler->handle(path, std::move(req), std::move(rep));
             return r.handle_exception(_general_handler);
         } catch (...) {
@@ -106,8 +108,7 @@ future<std::unique_ptr<http::reply> > routes::handle(const sstring& path, std::u
         }
     } else {
         rep.reset(new http::reply());
-        json_exception ex(not_found_exception("Not found"));
-        rep->set_status(http::reply::status_type::not_found, ex.to_json()).done(
+        rep->set_status(http::reply::status_type::not_found, internal::to_json(not_found_exception("Not found"))).done(
                 "json");
     }
     return make_ready_future<std::unique_ptr<http::reply>>(std::move(rep));

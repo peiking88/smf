@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <system_error>
 #include <vector>
 #include <unordered_map>
 #include <memory>
@@ -54,6 +55,7 @@ struct hostent {
     std::vector<sstring> names;
     // Primary address is also always first.
     std::vector<inet_address> addr_list;
+    std::vector<unsigned int> addr_ttls;
 };
 
 typedef std::optional<inet_address::family> opt_family;
@@ -148,6 +150,13 @@ future<sstring> resolve_addr(const inet_address&);
 future<std::vector<srv_record>> get_srv_records(dns_resolver::srv_proto proto,
                                                 const sstring& service,
                                                 const sstring& domain);
+
+/**
+ * Error handling.
+ *
+ * The error_category instance used by exceptions thrown by DNS
+ */
+ const std::error_category& error_category();
 
 }
 

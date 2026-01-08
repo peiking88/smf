@@ -255,6 +255,9 @@ seastar_add_app_test (alien
 seastar_add_test (checked_ptr
   SOURCES checked_ptr_test.cc)
 
+seastar_add_test (temporary_buffer
+  SOURCES temporary_buffer_test.cc)
+
 seastar_add_test (chunked_fifo
   KIND BOOST
   SOURCES chunked_fifo_test.cc)
@@ -282,6 +285,9 @@ seastar_add_test (content_source
 seastar_add_test (coroutines
   SOURCES coroutines_test.cc)
 
+seastar_add_test (generator
+  SOURCES generator_test.cc)
+
 seastar_add_test (defer
   KIND BOOST
   SOURCES defer_test.cc)
@@ -290,7 +296,7 @@ seastar_add_test (deleter
   KIND BOOST
   SOURCES deleter_test.cc)
 
-seastar_add_app_test (directory
+seastar_add_test (directory
   SOURCES directory_test.cc)
 
 seastar_add_test (distributed
@@ -318,7 +324,9 @@ seastar_add_test (file_io
   SOURCES file_io_test.cc)
 
 seastar_add_test (file_utils
-  SOURCES file_utils_test.cc)
+  SOURCES
+    file_utils_test.cc
+    expected_exception.hh)
 
 seastar_add_test (foreign_ptr
   SOURCES foreign_ptr_test.cc)
@@ -332,7 +340,9 @@ seastar_add_test (fstream
     mock_file.hh)
 
 seastar_add_test (futures
-  SOURCES futures_test.cc)
+  SOURCES
+    futures_test.cc
+    expected_exception.hh)
 
 seastar_add_test (sharded
   SOURCES sharded_test.cc)
@@ -340,7 +350,8 @@ seastar_add_test (sharded
 seastar_add_test (httpd
   SOURCES
     httpd_test.cc
-    loopback_socket.hh)
+    loopback_socket.hh
+    memory-data-sink.hh)
 
 seastar_add_test (websocket
   SOURCES websocket_test.cc)
@@ -352,7 +363,12 @@ seastar_add_test (network_interface
   SOURCES network_interface_test.cc)
 
 seastar_add_test (json_formatter
-  SOURCES json_formatter_test.cc)
+  SOURCES
+    json_formatter_test.cc
+    memory-data-sink.hh)
+
+seastar_add_test (libc_wrapper
+  SOURCES libc_wrapper_test.cc)
 
 seastar_add_test (locking
   SOURCES locking_test.cc)
@@ -372,7 +388,9 @@ seastar_add_test (noncopyable_function
   SOURCES noncopyable_function_test.cc)
 
 seastar_add_test (output_stream
-  SOURCES output_stream_test.cc)
+  SOURCES
+    output_stream_test.cc
+    memory-data-sink.hh)
 
 seastar_add_test (packet
   KIND BOOST
@@ -381,6 +399,9 @@ seastar_add_test (packet
 seastar_add_test (program_options
   KIND BOOST
   SOURCES program_options_test.cc)
+
+seastar_add_test (proxy_protocol
+  SOURCES proxy_protocol_test.cc)
 
 seastar_add_test (queue
   SOURCES queue_test.cc)
@@ -394,7 +415,9 @@ seastar_add_test (rpc
     rpc_test.cc)
 
 seastar_add_test (semaphore
-  SOURCES semaphore_test.cc)
+  SOURCES
+    semaphore_test.cc
+    expected_exception.hh)
 
 seastar_add_test (shared_ptr
   KIND BOOST
@@ -407,10 +430,9 @@ seastar_add_test (simple_stream
   KIND BOOST
   SOURCES simple_stream_test.cc)
 
-# TODO: Disabled for now. See GH-520.
-# seastar_add_test (slab
-#   SOURCES slab_test.cc
-#   NO_SEASTAR_TESTING_LIBRARY)
+seastar_add_test (slab
+  KIND BOOST
+  SOURCES slab_test.cc)
 
 seastar_add_app_test (smp
   SOURCES smp_test.cc)
@@ -420,7 +442,9 @@ seastar_add_test (app-template
   SOURCES app-template_test.cc)
 
 seastar_add_test (socket
-  SOURCES socket_test.cc)
+  SOURCES socket_test.cc
+  # https://github.com/scylladb/seastar/issues/2302
+  RUN_ARGS --reactor-backend linux-aio)
 
 seastar_add_test (sstring
   KIND BOOST
@@ -439,10 +463,10 @@ seastar_add_test (thread
 seastar_add_test (scheduling_group
   SOURCES scheduling_group_test.cc)
 
-seastar_add_app_test (thread_context_switch
-  SOURCES thread_context_switch_test.cc)
+seastar_add_test (scheduling_group_nesting
+  SOURCES scheduling_group_nesting_test.cc)
 
-seastar_add_app_test (timer
+seastar_add_test (timer
   SOURCES timer_test.cc)
 
 seastar_add_test (uname
@@ -455,6 +479,13 @@ seastar_add_test (source_location
 
 seastar_add_test (shared_token_bucket
   SOURCES shared_token_bucket_test.cc)
+
+seastar_add_test (prometheus_text
+  SOURCES prometheus_text_test.cc)
+
+seastar_add_test (prometheus_http
+  SOURCES
+    prometheus_http_test.cc)
 
 function(seastar_add_certgen name)
   cmake_parse_arguments(CERT
@@ -526,6 +557,7 @@ function(seastar_add_certgen name)
   set(CERT_PRIVKEY ${CERT_NAME}.key)
   set(CERT_REQ ${CERT_NAME}.csr)
   set(CERT_CERT ${CERT_NAME}.crt)
+  set(CERT_CERT_DER ${CERT_NAME}.crt.der)
 
   set(CERT_CAPRIVKEY ca${CERT_NAME}.key)
   set(CERT_CAROOT ca${CERT_NAME}.pem)
@@ -559,15 +591,21 @@ function(seastar_add_certgen name)
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
-  
+
   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${CERT_CERT}"
     COMMAND ${OPENSSL} x509 -req -in ${CERT_REQ} -CA ${CERT_CAROOT} -CAkey ${CERT_CAPRIVKEY} -CAcreateserial -out ${CERT_CERT} -days ${CERT_DAYS} -extensions req_ext -extfile ${CERT_NAME}.cfg
     DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${CERT_REQ}"  "${CMAKE_CURRENT_BINARY_DIR}/${CERT_CAROOT}" "${CMAKE_CURRENT_BINARY_DIR}/${CERT_NAME}.cfg"
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   )
 
-  add_custom_target(${name}
+  add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${CERT_CERT_DER}"
+    COMMAND ${OPENSSL} x509 -in ${CERT_CERT} -out ${CERT_CERT_DER} -outform der
     DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${CERT_CERT}"
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  )
+
+  add_custom_target(${name}
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/${CERT_CERT_DER}"
   )
 endfunction()
 
@@ -723,10 +761,72 @@ seastar_add_test (exception_logging
   SOURCES exception_logging_test.cc)
 
 seastar_add_test (closeable
-  SOURCES closeable_test.cc)
+  SOURCES
+    closeable_test.cc
+    expected_exception.hh)
 
 seastar_add_test (pipe
   SOURCES pipe_test.cc)
 
 seastar_add_test (spawn
   SOURCES spawn_test.cc)
+
+seastar_add_test (variant_utils
+  SOURCES variant_utils_test.cc)
+
+seastar_generate_swagger (
+  TARGET rest_api_httpd_swagger
+  VAR rest_api_httpd_swagger_files
+  IN_FILE ${CMAKE_CURRENT_SOURCE_DIR}/api.json
+  OUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
+
+add_executable (rest_api_httpd
+  ${rest_api_httpd_swagger_files}
+  rest_api_httpd.cc)
+target_link_libraries (rest_api_httpd
+  PRIVATE seastar_private)
+target_include_directories (rest_api_httpd
+  PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+add_dependencies (rest_api_httpd rest_api_httpd_swagger)
+add_dependencies (unit_tests rest_api_httpd)
+add_custom_target (test_unit_json2code_run
+  COMMAND ${CMAKE_COMMAND} -E env ${Seastar_TEST_ENVIRONMENT} ${CMAKE_CURRENT_SOURCE_DIR}/json2code_test.py --rest-api-httpd $<TARGET_FILE:rest_api_httpd>
+  USES_TERMINAL)
+add_dependencies (test_unit_json2code_run rest_api_httpd)
+add_test (
+  NAME Seastar.unit.json2code
+  COMMAND ${CMAKE_COMMAND} --build ${Seastar_BINARY_DIR} --target test_unit_json2code_run)
+set_tests_properties (Seastar.unit.json2code
+  PROPERTIES
+    TIMEOUT ${Seastar_TEST_TIMEOUT})
+
+add_executable (metrics_tester
+  metrics_tester.cc)
+target_link_libraries (metrics_tester
+  PRIVATE
+    seastar_private
+    yaml-cpp::yaml-cpp)
+
+add_dependencies (unit_tests metrics_tester)
+add_custom_target (test_unit_prometheus_run
+  COMMAND ${CMAKE_COMMAND} -E env ${Seastar_TEST_ENVIRONMENT}
+    ${CMAKE_CURRENT_SOURCE_DIR}/prometheus_test.py
+    --exporter $<TARGET_FILE:metrics_tester>
+    --config ${CMAKE_CURRENT_SOURCE_DIR}/conf-example.yaml
+  USES_TERMINAL)
+add_dependencies (test_unit_prometheus_run metrics_tester)
+add_test (
+  NAME Seastar.unit.prometheus
+  COMMAND ${CMAKE_COMMAND} --build ${Seastar_BINARY_DIR} --target test_unit_prometheus_run)
+set_tests_properties (Seastar.unit.prometheus
+  PROPERTIES
+    TIMEOUT ${Seastar_TEST_TIMEOUT})
+
+seastar_add_test (gate
+  SOURCES
+    gate_test.cc)
+
+seastar_add_test (test_fixture
+  SOURCES
+    test_fixture_test.cc)
