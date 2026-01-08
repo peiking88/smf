@@ -15,6 +15,9 @@ This project has been refactored to support modern C++ standards and updated dep
 - Implemented using `std::source_location` (C++20) for automatic file/line/function capture
 - Integrated with **Seastar logger** interface
 
+### CMake Compatibility Fixes
+- Added **CMP0167** policy setting to use Boost's own CMake config instead of deprecated FindBoost module (CMake 3.30+)
+
 ### Seastar API Compatibility Fixes
 - **Metrics API**: Replaced deprecated `sm::make_derive` with `sm::make_counter` and `sm::make_gauge`
 - **Server Socket**: Changed `lw_shared_ptr<server_socket>` to `std::optional<server_socket>`

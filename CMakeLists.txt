@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.7.0)
+cmake_minimum_required(VERSION 3.16...3.28)
 project(SMF VERSION "0.1.0" LANGUAGES CXX C)
 
 # Set C++23 standard
@@ -75,6 +75,10 @@ add_subdirectory(seastar)
 find_package(Flatbuffers REQUIRED)
 find_package(gflags REQUIRED)
 find_package(glog REQUIRED)
+# CMP0167: Use Boost's own CMake config instead of FindBoost module
+if(POLICY CMP0167)
+  cmake_policy(SET CMP0167 NEW)
+endif()
 find_package(Boost COMPONENTS
   system
   filesystem
