@@ -14,8 +14,8 @@ set(CMAKE_CXX_FLAGS_DEBUG "-O0 -g")
 set(CMAKE_CXX_FLAGS_RELEASE "-O2 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
 set(CMAKE_CXX_FLAGS_MINSIZEREL "-Os")
-# Suppress fmt deprecation warnings
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
+# Suppress warnings and notes
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations -w -Wno-note")
 if(NOT CMAKE_BUILD_TYPE)
    set(CMAKE_BUILD_TYPE Release)
 endif()
